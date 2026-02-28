@@ -320,7 +320,7 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, CRYPTO_AEAD_MIC_LENGTH, ENC_NA);
     }
 
-    return offset;
+    return tvb_captured_length(tvb);
 }
 
 static int
