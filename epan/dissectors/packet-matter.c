@@ -150,9 +150,11 @@ static FILE                 *matter_keylog_file;
  * verification.
  */
 typedef struct {
-    char *session_id_str;  /* hex session ID, e.g. "002A" */
-    char *i2r_key;         /* 32 hex chars (16 bytes) or empty */
-    char *r2i_key;         /* 32 hex chars (16 bytes) or empty */
+    char *session_id_str;       /* hex session ID, e.g. "002A" */
+    char *initiator_node_id_str; /* 64-bit initiator node ID, hex with 0x prefix */
+    char *responder_node_id_str; /* 64-bit responder node ID, hex with 0x prefix */
+    char *i2r_key;              /* 32 hex chars (16 bytes) or empty */
+    char *r2i_key;              /* 32 hex chars (16 bytes) or empty */
 } matter_key_uat_record_t;
 
 static matter_key_uat_record_t *matter_key_uat_records;
@@ -163,9 +165,11 @@ matter_key_uat_copy_cb(void *dest, const void *source, size_t len _U_)
 {
     const matter_key_uat_record_t *s = (const matter_key_uat_record_t *)source;
     matter_key_uat_record_t       *d = (matter_key_uat_record_t *)dest;
-    d->session_id_str = g_strdup(s->session_id_str);
-    d->i2r_key        = g_strdup(s->i2r_key);
-    d->r2i_key        = g_strdup(s->r2i_key);
+    d->session_id_str       = g_strdup(s->session_id_str);
+    d->initiator_node_id_str = g_strdup(s->initiator_node_id_str);
+    d->responder_node_id_str = g_strdup(s->responder_node_id_str);
+    d->i2r_key              = g_strdup(s->i2r_key);
+    d->r2i_key              = g_strdup(s->r2i_key);
     return dest;
 }
 
@@ -190,6 +194,24 @@ matter_key_uat_update_cb(void *r, char **error)
     if (sid > 0xFFFF) {
         *error = g_strdup("Session ID must be a 16-bit value (0-65535 or 0x0000-0xFFFF)");
         return false;
+    }
+
+    /* Validate node IDs (optional, but if present must be valid hex) */
+    if (rec->initiator_node_id_str && *rec->initiator_node_id_str) {
+        char *endp2 = NULL;
+        (void)g_ascii_strtoull(rec->initiator_node_id_str, &endp2, 0);
+        if (endp2 == rec->initiator_node_id_str || *endp2 != '\0') {
+            *error = g_strdup("Initiator Node ID must be a number (decimal or 0x hex)");
+            return false;
+        }
+    }
+    if (rec->responder_node_id_str && *rec->responder_node_id_str) {
+        char *endp2 = NULL;
+        (void)g_ascii_strtoull(rec->responder_node_id_str, &endp2, 0);
+        if (endp2 == rec->responder_node_id_str || *endp2 != '\0') {
+            *error = g_strdup("Responder Node ID must be a number (decimal or 0x hex)");
+            return false;
+        }
     }
 
     /* At least one key must be provided */
@@ -231,6 +253,8 @@ matter_key_uat_free_cb(void *r)
 {
     matter_key_uat_record_t *rec = (matter_key_uat_record_t *)r;
     g_free(rec->session_id_str);
+    g_free(rec->initiator_node_id_str);
+    g_free(rec->responder_node_id_str);
     g_free(rec->i2r_key);
     g_free(rec->r2i_key);
 }
@@ -239,6 +263,8 @@ static void matter_key_uat_apply(void)  { /* Keys read on the fly during dissect
 static void matter_key_uat_reset(void)  { /* Nothing to clean up */ }
 
 UAT_CSTRING_CB_DEF(matter_key_uat, session_id_str, matter_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_key_uat, initiator_node_id_str, matter_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_key_uat, responder_node_id_str, matter_key_uat_record_t)
 UAT_CSTRING_CB_DEF(matter_key_uat, i2r_key, matter_key_uat_record_t)
 UAT_CSTRING_CB_DEF(matter_key_uat, r2i_key, matter_key_uat_record_t)
 
@@ -351,27 +377,43 @@ matter_find_session_key(uint16_t session_id)
 }
 
 /*
+ * A candidate decryption key together with the source node ID to use
+ * when constructing the nonce.  For I2R keys the source is the Initiator;
+ * for R2I keys it is the Responder.  A value of 0 means "use whatever
+ * source_node_id appeared in the message header" (legacy / keylog-file
+ * keys that have no out-of-band node ID information).
+ */
+typedef struct {
+    const uint8_t *key;
+    uint64_t       source_node_id;
+    bool           has_node_id;   /* true if source_node_id was explicitly set */
+} matter_candidate_key_t;
+
+/*
  * Collect all candidate decryption keys for a given session ID.
  *
  * Checks the keylog-file table first, then the UAT table.  Returns the
- * number of keys written into *keys (max *max_keys*).  Each entry
- * points into static storage that is valid for the lifetime of the
- * dissection pass.
+ * number of entries written into *candidates (max *max_keys*).  Key data
+ * points into static storage valid for the lifetime of the dissection pass.
  */
 static uint8_t uat_key_buf[2 * MATTER_SESSION_KEY_LEN];  /* scratch space for UAT keys */
 
 static unsigned
 matter_collect_session_keys(uint16_t session_id,
-                            const uint8_t *keys[], unsigned max_keys)
+                            matter_candidate_key_t candidates[], unsigned max_keys)
 {
     unsigned n = 0;
 
-    /* 1. Keylog-file key */
+    /* 1. Keylog-file key (no associated node ID) */
     const uint8_t *kf_key = matter_find_session_key(session_id);
-    if (kf_key && n < max_keys)
-        keys[n++] = kf_key;
+    if (kf_key && n < max_keys) {
+        candidates[n].key = kf_key;
+        candidates[n].source_node_id = 0;
+        candidates[n].has_node_id = false;
+        n++;
+    }
 
-    /* 2. UAT keys (I2R + R2I) */
+    /* 2. UAT keys (I2R + R2I) with per-direction node IDs */
     for (unsigned i = 0; i < num_matter_key_uat_records && n < max_keys; i++) {
         matter_key_uat_record_t *rec = &matter_key_uat_records[i];
         if (!rec->session_id_str || !*rec->session_id_str)
@@ -380,15 +422,37 @@ matter_collect_session_keys(uint16_t session_id,
         if ((uint16_t)sid != session_id)
             continue;
 
+        /* Parse node IDs once per matching UAT row */
+        uint64_t initiator_nid = 0;
+        bool has_initiator_nid = false;
+        if (rec->initiator_node_id_str && *rec->initiator_node_id_str) {
+            initiator_nid = g_ascii_strtoull(rec->initiator_node_id_str, NULL, 0);
+            has_initiator_nid = true;
+        }
+        uint64_t responder_nid = 0;
+        bool has_responder_nid = false;
+        if (rec->responder_node_id_str && *rec->responder_node_id_str) {
+            responder_nid = g_ascii_strtoull(rec->responder_node_id_str, NULL, 0);
+            has_responder_nid = true;
+        }
+
         if (rec->i2r_key && strlen(rec->i2r_key) == 2 * MATTER_SESSION_KEY_LEN && n < max_keys) {
             uint8_t *buf = &uat_key_buf[0];
-            if (hex_to_bytes(rec->i2r_key, buf, MATTER_SESSION_KEY_LEN))
-                keys[n++] = buf;
+            if (hex_to_bytes(rec->i2r_key, buf, MATTER_SESSION_KEY_LEN)) {
+                candidates[n].key = buf;
+                candidates[n].source_node_id = initiator_nid;
+                candidates[n].has_node_id = has_initiator_nid;
+                n++;
+            }
         }
         if (rec->r2i_key && strlen(rec->r2i_key) == 2 * MATTER_SESSION_KEY_LEN && n < max_keys) {
             uint8_t *buf = &uat_key_buf[MATTER_SESSION_KEY_LEN];
-            if (hex_to_bytes(rec->r2i_key, buf, MATTER_SESSION_KEY_LEN))
-                keys[n++] = buf;
+            if (hex_to_bytes(rec->r2i_key, buf, MATTER_SESSION_KEY_LEN)) {
+                candidates[n].key = buf;
+                candidates[n].source_node_id = responder_nid;
+                candidates[n].has_node_id = has_responder_nid;
+                n++;
+            }
         }
     }
     return n;
@@ -861,39 +925,29 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         matter_keylog_read();
 
         /* Collect all candidate keys (keylog file + UAT) and try each */
-        const uint8_t *candidate_keys[8];
+        matter_candidate_key_t candidates[8];
         unsigned num_keys = matter_collect_session_keys((uint16_t)session_id,
-                                                       candidate_keys,
-                                                       array_length(candidate_keys));
+                                                       candidates,
+                                                       array_length(candidates));
         tvbuff_t *decrypted_tvb = NULL;
 
-        uint8_t nonce[MATTER_NONCE_LEN];
-        matter_build_nonce(security_flags, message_counter, source_node_id, nonce);
-
-        ws_debug("Session 0x%04x: %u candidate key(s), payload=%u bytes, "
-                 "nonce=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
-                 session_id, num_keys, payload_length,
-                 nonce[0], nonce[1], nonce[2], nonce[3], nonce[4],
-                 nonce[5], nonce[6], nonce[7], nonce[8], nonce[9],
-                 nonce[10], nonce[11], nonce[12]);
-
         for (unsigned ki = 0; ki < num_keys && !decrypted_tvb; ki++) {
-            ws_debug("  Trying key %u/%u: %02x%02x%02x%02x...%02x%02x%02x%02x",
-                     ki + 1, num_keys,
-                     candidate_keys[ki][0], candidate_keys[ki][1],
-                     candidate_keys[ki][2], candidate_keys[ki][3],
-                     candidate_keys[ki][12], candidate_keys[ki][13],
-                     candidate_keys[ki][14], candidate_keys[ki][15]);
+            /* Build a per-key nonce: use the candidate's source_node_id if
+             * explicitly provided (from UAT), otherwise fall back to
+             * whatever source_node_id appeared in the message header. */
+            uint64_t nonce_node_id = candidates[ki].has_node_id
+                                   ? candidates[ki].source_node_id
+                                   : source_node_id;
+            uint8_t nonce[MATTER_NONCE_LEN];
+            matter_build_nonce(security_flags, message_counter, nonce_node_id, nonce);
+
             decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset,
                                                    payload_length,
-                                                   candidate_keys[ki], nonce);
-            if (!decrypted_tvb)
-                ws_debug("  Key %u/%u: MIC verification failed", ki + 1, num_keys);
+                                                   candidates[ki].key, nonce);
         }
 
         if (decrypted_tvb) {
             /* Decryption succeeded - show decrypted payload */
-            ws_debug("  Decryption succeeded for session 0x%04x", session_id);
             proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Decrypted Payload (%u bytes)", payload_length);
             proto_tree *payload_tree = proto_item_add_subtree(payload_item, ett_payload);
 
@@ -1488,6 +1542,12 @@ proto_register_matter(void)
     static uat_field_t matter_key_uat_fields[] = {
         UAT_FLD_CSTRING(matter_key_uat, session_id_str, "Session ID",
                         "16-bit session ID in decimal or hex (e.g. 42 or 0x002A)"),
+        UAT_FLD_CSTRING(matter_key_uat, initiator_node_id_str, "Initiator Node ID",
+                        "64-bit node ID of the session Initiator in hex (e.g. 0xF3AD187FAE395763). "
+                        "Used in the nonce when decrypting with the I2R key."),
+        UAT_FLD_CSTRING(matter_key_uat, responder_node_id_str, "Responder Node ID",
+                        "64-bit node ID of the session Responder in hex (e.g. 0x73EC64A6E69AE0DF). "
+                        "Used in the nonce when decrypting with the R2I key."),
         UAT_FLD_CSTRING(matter_key_uat, i2r_key, "I2R Key",
                         "Initiator-to-Responder AES-128 key (32 hex chars, or empty)"),
         UAT_FLD_CSTRING(matter_key_uat, r2i_key, "R2I Key",
@@ -1513,9 +1573,10 @@ proto_register_matter(void)
     prefs_register_uat_preference(matter_module, "session_keys",
             "CASE session keys",
             "A table of Matter CASE/PASE session keys for decryption.\n"
-            "Enter the session ID (decimal or 0x-prefixed hex) and the I2R and/or R2I AES-128 key\n"
-            "(32 hex characters each). The dissector will try both keys and\n"
-            "use whichever one passes MIC verification.",
+            "Enter the session ID (decimal or 0x-prefixed hex), the Initiator and\n"
+            "Responder node IDs (0x-prefixed hex), and the I2R and/or R2I AES-128\n"
+            "keys (32 hex characters each). Node IDs are needed for the decryption\n"
+            "nonce when they are not present in the message header.",
             matter_keys_uat);
 
     register_shutdown_routine(matter_keylog_reset);
