@@ -94,6 +94,9 @@ static int ett_matter_tlv_control;
 
 static expert_field ei_matter_tlv_unsupported_control;
 
+// Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
+#define MATTER_DEFAULT_PORT 5540
+
 /* message flags + session ID + security flags + counter */
 #define MATTER_MIN_LENGTH 8
 
@@ -787,5 +790,5 @@ proto_register_matter(void)
 void
 proto_reg_handoff_matter(void)
 {
-    dissector_add_for_decode_as("udp.port", matter_handle);
+    dissector_add_uint_with_preference("udp.port", MATTER_DEFAULT_PORT, matter_handle);
 }
