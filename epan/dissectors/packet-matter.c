@@ -52,6 +52,8 @@ static int hf_message_src_id;
 static int hf_message_dest_node_id;
 static int hf_message_dest_group_id;
 static int hf_message_privacy_header;
+static int hf_message_ext_length;
+static int hf_message_ext_data;
 
 static int hf_payload;
 static int hf_payload_mic;
@@ -382,6 +384,17 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             proto_tree_add_item_ret_uint(matter_tree, hf_message_dest_group_id, tvb, offset, 2, ENC_LITTLE_ENDIAN, &group_id);
             col_append_fstr(pinfo->cinfo, COL_INFO, " Group=0x%04x", group_id);
             offset += 2;
+        }
+
+        // Section 4.4.1.8: Message Extensions
+        if (security_flags & SECURITY_FLAG_HAS_EXTENSIONS) {
+            uint32_t ext_len = 0;
+            proto_tree_add_item_ret_uint(matter_tree, hf_message_ext_length, tvb, offset, 2, ENC_LITTLE_ENDIAN, &ext_len);
+            offset += 2;
+            if (ext_len > 0) {
+                proto_tree_add_item(matter_tree, hf_message_ext_data, tvb, offset, ext_len, ENC_NA);
+                offset += ext_len;
+            }
         }
 
     }
@@ -740,6 +753,16 @@ proto_register_matter(void)
           { "Encrypted header fields", "matter.message.privacy_header",
             FT_BYTES, BASE_NONE, NULL, 0,
             "Headers encrypted with message privacy", HFILL }
+        },
+        { &hf_message_ext_length,
+          { "Message Extensions Length", "matter.message.ext_length",
+            FT_UINT16, BASE_DEC, NULL, 0,
+            "Length of message extensions data, in bytes", HFILL }
+        },
+        { &hf_message_ext_data,
+          { "Message Extensions Data", "matter.message.ext_data",
+            FT_BYTES, BASE_NONE, NULL, 0,
+            "Message extensions payload", HFILL }
         },
         { &hf_payload,
           { "Payload", "matter.payload",
