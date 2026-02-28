@@ -129,6 +129,7 @@ static const value_string dsiz_vals[] = {
     { 0, "Not present" },
     { MESSAGE_FLAG_HAS_DEST_NODE,  "64-bit Node ID" },
     { MESSAGE_FLAG_HAS_DEST_GROUP, "16-bit Group ID" },
+    { 3, "64-bit Node ID (Reserved)" },
     { 0, NULL }
 };
 
@@ -136,6 +137,77 @@ static const value_string session_type_vals[] = {
     { 0, "Unicast Session" },
     { 1, "Group Session" },
     { 0, NULL }
+};
+
+// Section 4.4.3.4: Protocol IDs
+static const value_string protocol_id_vals[] = {
+    { 0x0000, "Secure Channel" },
+    { 0x0001, "Interaction Model" },
+    { 0x0002, "BDX (Bulk Data Exchange)" },
+    { 0x0003, "User Directed Commissioning" },
+    { 0, NULL }
+};
+
+// Section 4.13.1: Secure Channel Protocol Opcodes
+static const value_string sc_opcode_vals[] = {
+    { 0x10, "MsgCounterSyncReq" },
+    { 0x11, "MsgCounterSyncRsp" },
+    { 0x20, "MRP Standalone Acknowledgement" },
+    { 0x30, "PBKDFParamRequest" },
+    { 0x31, "PBKDFParamResponse" },
+    { 0x32, "PASE Pake1" },
+    { 0x33, "PASE Pake2" },
+    { 0x34, "PASE Pake3" },
+    { 0x40, "StatusReport" },
+    { 0x50, "ICD CheckIn" },
+    { 0x60, "CASE Sigma1" },
+    { 0x61, "CASE Sigma2" },
+    { 0x62, "CASE Sigma3" },
+    { 0x63, "CASE Sigma2Resume" },
+    { 0, NULL }
+};
+
+// Section 8.2.3: Interaction Model Protocol Opcodes
+static const value_string im_opcode_vals[] = {
+    { 0x01, "StatusResponse" },
+    { 0x02, "ReadRequest" },
+    { 0x03, "SubscribeRequest" },
+    { 0x04, "SubscribeResponse" },
+    { 0x05, "ReportData" },
+    { 0x06, "WriteRequest" },
+    { 0x07, "WriteResponse" },
+    { 0x08, "InvokeRequest" },
+    { 0x09, "InvokeResponse" },
+    { 0x0A, "TimedRequest" },
+    { 0, NULL }
+};
+
+// Section 11.22.5: BDX Protocol Opcodes
+static const value_string bdx_opcode_vals[] = {
+    { 0x01, "SendInit" },
+    { 0x02, "SendAccept" },
+    { 0x04, "ReceiveInit" },
+    { 0x05, "ReceiveAccept" },
+    { 0x10, "BlockQuery" },
+    { 0x11, "Block" },
+    { 0x12, "BlockEOF" },
+    { 0x13, "BlockAck" },
+    { 0x14, "BlockAckEOF" },
+    { 0x15, "BlockQueryWithSkip" },
+    { 0, NULL }
+};
+
+// Section 5.3: User Directed Commissioning Protocol Opcodes
+static const value_string udc_opcode_vals[] = {
+    { 0x00, "IdentificationDeclaration" },
+    { 0, NULL }
+};
+
+static const value_string *opcode_vals_by_protocol[] = {
+    sc_opcode_vals,   // 0x0000: Secure Channel
+    im_opcode_vals,   // 0x0001: Interaction Model
+    bdx_opcode_vals,  // 0x0002: BDX
+    udc_opcode_vals,  // 0x0003: User Directed Commissioning
 };
 
 // Appendix 7.2. Tag Control Field
@@ -347,13 +419,15 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
     offset += 1;
 
     // Section 4.4.3.2
-    proto_tree_add_item(pl_tree, hf_payload_protocol_opcode, tvb, offset, 1, ENC_LITTLE_ENDIAN);
+    uint32_t protocol_opcode = 0;
+    proto_tree_add_item_ret_uint(pl_tree, hf_payload_protocol_opcode, tvb, offset, 1, ENC_LITTLE_ENDIAN, &protocol_opcode);
     offset += 1;
 
     // Section 4.4.3.3
     proto_tree_add_item(pl_tree, hf_payload_exchange_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
     offset += 2;
 
+    uint32_t protocol_vendor_id = 0;
     if (exchange_flags & EXCHANGE_FLAG_HAS_VENDOR_PROTO) {
         // NOTE: The Matter specification R1.0 (22-27349) section 4.4 says
         // the Vendor ID comes after the Protocol ID. However, the SDK
@@ -363,13 +437,26 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         // in a future version:
         // https://github.com/project-chip/connectedhomeip/issues/25003
         // So we parse Vendor ID first, contrary to the current spec.
-        proto_tree_add_item(pl_tree, hf_payload_protocol_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item_ret_uint(pl_tree, hf_payload_protocol_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN, &protocol_vendor_id);
         offset += 2;
     }
 
     // Section 4.4.3.4
-    proto_tree_add_item(pl_tree, hf_payload_protocol_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+    uint32_t protocol_id = 0;
+    proto_tree_add_item_ret_uint(pl_tree, hf_payload_protocol_id, tvb, offset, 2, ENC_LITTLE_ENDIAN, &protocol_id);
     offset += 2;
+
+    // Look up protocol-specific opcode name for display
+    const char *opcode_name = NULL;
+    if (protocol_vendor_id == 0 && protocol_id < array_length(opcode_vals_by_protocol)) {
+        opcode_name = try_val_to_str(protocol_opcode, opcode_vals_by_protocol[protocol_id]);
+    }
+    const char *protocol_name = val_to_str_const(protocol_id, protocol_id_vals, "Unknown");
+    if (opcode_name) {
+        col_append_fstr(pinfo->cinfo, COL_INFO, " %s: %s", protocol_name, opcode_name);
+    } else {
+        col_append_fstr(pinfo->cinfo, COL_INFO, " %s: Opcode=0x%02x", protocol_name, protocol_opcode);
+    }
 
     // Section 4.4.3.6
     if (exchange_flags & EXCHANGE_FLAG_ACK_MSG) {
@@ -670,7 +757,7 @@ proto_register_matter(void)
         },
         { &hf_payload_protocol_id,
           { "Protocol ID", "matter.payload.protocol_id",
-            FT_UINT16, BASE_HEX, NULL, 0,
+            FT_UINT16, BASE_HEX, VALS(protocol_id_vals), 0,
             "The protocol in which the Protocol Opcode of the message is defined", HFILL }
         },
         { &hf_payload_ack_counter,
