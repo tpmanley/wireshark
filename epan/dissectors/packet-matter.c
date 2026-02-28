@@ -17,9 +17,8 @@
  * The specification can be freely requested at:
  * https://csa-iot.org/developer-resource/specifications-download-request/
  *
- * Comments below reference section numbers of the Matter Core Specification R1.0 (22-27349-001).
- *
- * Matter-TLV dissector is based on Matter Specification Version 1.3.
+ * Comments below reference section numbers of the Matter Core
+ * Specification Version 1.5.
  */
 
 #include <config.h>
