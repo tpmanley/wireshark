@@ -25,12 +25,18 @@
 
 #include <epan/expert.h>
 #include <epan/packet.h>
+#include <epan/prefs.h>
 #include <wsutil/array.h>
+#include <wsutil/file_util.h>
+#include <wsutil/filesystem.h>
+#include <wsutil/wsgcrypt.h>
 
 /* Prototypes */
 /* (Required to prevent [-Wmissing-prototypes] warnings */
 void proto_reg_handoff_matter(void);
 void proto_register_matter(void);
+
+static int  dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
 
 /* Initialize the protocol and registered fields */
 static dissector_handle_t matter_handle;
@@ -55,6 +61,7 @@ static int hf_message_ext_length;
 static int hf_message_ext_data;
 
 static int hf_payload;
+static int hf_payload_decrypted;
 static int hf_payload_mic;
 static int hf_payload_exchange_flags;
 static int hf_payload_flag_initiator;
@@ -99,14 +106,252 @@ static int ett_matter_tlv_control;
 
 static expert_field ei_matter_tlv_unsupported_control;
 
+/*
+ * Session key storage for decryption.
+ *
+ * Keys are loaded from a key log file with lines in the format:
+ *   SESSION_KEY <session_id_hex> <32_hex_bytes_of_key>
+ *
+ * For example:
+ *   SESSION_KEY 0x1234 a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+ *
+ * The session key can be exported from the Matter SDK by instrumenting
+ * the CASE session establishment code.
+ */
+#define MATTER_SESSION_KEY_LEN    16
+#define MATTER_NONCE_LEN         13
+#define MATTER_MIC_LEN           16  /* AES-128-CCM authentication tag */
+
+typedef struct {
+    uint16_t session_id;
+    uint8_t  key[MATTER_SESSION_KEY_LEN];
+} matter_session_key_t;
+
+static matter_session_key_t *session_keys;
+static unsigned              session_key_count;
+static const char           *pref_keylog_file;
+static FILE                 *matter_keylog_file;
+
+static void
+matter_keylog_reset(void)
+{
+    if (matter_keylog_file) {
+        fclose(matter_keylog_file);
+        matter_keylog_file = NULL;
+    }
+    g_free(session_keys);
+    session_keys = NULL;
+    session_key_count = 0;
+}
+
+static bool
+hex_to_bytes(const char *hex, uint8_t *out, unsigned len)
+{
+    for (unsigned i = 0; i < len; i++) {
+        int hi = g_ascii_xdigit_value(hex[2 * i]);
+        int lo = g_ascii_xdigit_value(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0)
+            return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+static void
+matter_keylog_read(void)
+{
+    if (!pref_keylog_file || !*pref_keylog_file) {
+        return;
+    }
+
+    /* Reopen file if it was deleted/overwritten. */
+    if (matter_keylog_file && file_needs_reopen(ws_fileno(matter_keylog_file), pref_keylog_file)) {
+        matter_keylog_reset();
+    }
+
+    if (!matter_keylog_file) {
+        matter_keylog_file = ws_fopen(pref_keylog_file, "r");
+        if (!matter_keylog_file) {
+            return;
+        }
+    }
+
+    /* Read new lines from the key log file.
+     * Format: SESSION_KEY <session_id_hex> <32_hex_key>
+     */
+    for (;;) {
+        char buf[256];
+        if (!fgets(buf, sizeof(buf), matter_keylog_file)) {
+            if (feof(matter_keylog_file)) {
+                clearerr(matter_keylog_file);
+            } else if (ferror(matter_keylog_file)) {
+                matter_keylog_reset();
+            }
+            break;
+        }
+
+        /* Skip comments and blank lines */
+        if (buf[0] == '#' || buf[0] == '\n' || buf[0] == '\r')
+            continue;
+
+        char label[64];
+        char sid_str[16];
+        char key_hex[64];
+        if (sscanf(buf, "%63s %15s %63s", label, sid_str, key_hex) != 3)
+            continue;
+        if (strcmp(label, "SESSION_KEY") != 0)
+            continue;
+
+        unsigned long sid = strtoul(sid_str, NULL, 0);
+        if (sid > 0xFFFF)
+            continue;
+
+        uint8_t key[MATTER_SESSION_KEY_LEN];
+        if (strlen(key_hex) != 2 * MATTER_SESSION_KEY_LEN)
+            continue;
+        if (!hex_to_bytes(key_hex, key, MATTER_SESSION_KEY_LEN))
+            continue;
+
+        /* Add/replace key for this session ID */
+        bool found = false;
+        for (unsigned i = 0; i < session_key_count; i++) {
+            if (session_keys[i].session_id == (uint16_t)sid) {
+                memcpy(session_keys[i].key, key, MATTER_SESSION_KEY_LEN);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            session_keys = g_realloc(session_keys, (session_key_count + 1) * sizeof(matter_session_key_t));
+            session_keys[session_key_count].session_id = (uint16_t)sid;
+            memcpy(session_keys[session_key_count].key, key, MATTER_SESSION_KEY_LEN);
+            session_key_count++;
+        }
+    }
+}
+
+static const uint8_t *
+matter_find_session_key(uint16_t session_id)
+{
+    for (unsigned i = 0; i < session_key_count; i++) {
+        if (session_keys[i].session_id == session_id)
+            return session_keys[i].key;
+    }
+    return NULL;
+}
+
+/*
+ * Construct the Matter message nonce (13 bytes) per spec Section 4.7.2:
+ *   Nonce = security_flags (1) || message_counter (4 LE) || source_node_id (8 LE)
+ *
+ * For unicast sessions without a source node ID in the header, the source
+ * node ID is set to all zeros.
+ */
+static void
+matter_build_nonce(uint8_t security_flags, uint32_t message_counter,
+                   uint64_t source_node_id, uint8_t *nonce)
+{
+    nonce[0] = security_flags;
+    nonce[1] = (uint8_t)(message_counter);
+    nonce[2] = (uint8_t)(message_counter >> 8);
+    nonce[3] = (uint8_t)(message_counter >> 16);
+    nonce[4] = (uint8_t)(message_counter >> 24);
+    nonce[5]  = (uint8_t)(source_node_id);
+    nonce[6]  = (uint8_t)(source_node_id >> 8);
+    nonce[7]  = (uint8_t)(source_node_id >> 16);
+    nonce[8]  = (uint8_t)(source_node_id >> 24);
+    nonce[9]  = (uint8_t)(source_node_id >> 32);
+    nonce[10] = (uint8_t)(source_node_id >> 40);
+    nonce[11] = (uint8_t)(source_node_id >> 48);
+    nonce[12] = (uint8_t)(source_node_id >> 56);
+}
+
+/*
+ * Attempt AES-128-CCM decryption of a Matter secured message.
+ * Returns a new tvbuff_t with the decrypted payload on success, or NULL.
+ *
+ * The AAD (additional authenticated data) is the message header bytes
+ * from the start of the packet up to the encrypted payload.
+ */
+static tvbuff_t *
+matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
+                       uint32_t header_len, uint32_t payload_len,
+                       const uint8_t *key, const uint8_t *nonce)
+{
+    gcry_cipher_hd_t cipher_hd;
+    gcry_error_t gcrypt_err;
+    uint64_t ccm_lengths[3];
+
+    if (gcry_cipher_open(&cipher_hd, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_CCM, 0)) {
+        return NULL;
+    }
+
+    gcrypt_err = gcry_cipher_setkey(cipher_hd, key, MATTER_SESSION_KEY_LEN);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    gcrypt_err = gcry_cipher_setiv(cipher_hd, nonce, MATTER_NONCE_LEN);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* CCM lengths: [0]=payload, [1]=AAD, [2]=tag(MIC) */
+    ccm_lengths[0] = payload_len;
+    ccm_lengths[1] = header_len;
+    ccm_lengths[2] = MATTER_MIC_LEN;
+
+    gcrypt_err = gcry_cipher_ctl(cipher_hd, GCRYCTL_SET_CCM_LENGTHS, ccm_lengths, sizeof(ccm_lengths));
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* Authenticate the message header (AAD) */
+    gcrypt_err = gcry_cipher_authenticate(cipher_hd,
+        tvb_get_ptr(tvb, 0, header_len), header_len);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* Decrypt the payload */
+    uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, payload_len);
+    gcrypt_err = gcry_cipher_decrypt(cipher_hd, decrypted, payload_len,
+        tvb_get_ptr(tvb, header_len, payload_len), payload_len);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* Verify the MIC (authentication tag) */
+    uint8_t *tag = (uint8_t *)wmem_alloc(pinfo->pool, MATTER_MIC_LEN);
+    gcrypt_err = gcry_cipher_gettag(cipher_hd, tag, MATTER_MIC_LEN);
+    gcry_cipher_close(cipher_hd);
+
+    if (gcrypt_err != 0) {
+        return NULL;
+    }
+
+    const uint8_t *expected_mic = tvb_get_ptr(tvb, header_len + payload_len, MATTER_MIC_LEN);
+    if (memcmp(tag, expected_mic, MATTER_MIC_LEN) != 0) {
+        /* MIC mismatch - wrong key or corrupted message */
+        return NULL;
+    }
+
+    /* Create a tvbuff from the decrypted data */
+    tvbuff_t *decrypted_tvb = tvb_new_child_real_data(tvb, decrypted, payload_len, payload_len);
+    add_new_data_source(pinfo, decrypted_tvb, "Decrypted Matter Payload");
+    return decrypted_tvb;
+}
+
 // Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
 #define MATTER_DEFAULT_PORT 5540
 
 /* message flags + session ID + security flags + counter */
 #define MATTER_MIN_LENGTH 8
-
-// Section 3.6
-#define CRYPTO_AEAD_MIC_LENGTH 16
 
 // Section 4.4.1.2
 #define MESSAGE_FLAG_VERSION_MASK       0xF0
@@ -286,6 +531,8 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     uint8_t message_dsiz = 0;
     uint8_t message_session_type = 0;
     uint32_t session_id = 0;
+    uint32_t message_counter = 0;
+    uint64_t source_node_id = 0;
 
     /* Check that the packet is long enough for it to belong to us. */
     if (tvb_reported_length(tvb) < MATTER_MIN_LENGTH)
@@ -359,16 +606,14 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     } else {
 
         // Section 4.4.1.5
-        unsigned int message_counter;
         proto_tree_add_item_ret_uint(matter_tree, hf_message_counter, tvb, offset, 4, ENC_LITTLE_ENDIAN, &message_counter);
         col_append_fstr(pinfo->cinfo, COL_INFO, ": Counter=%u", message_counter);
         offset += 4;
 
         // Section 4.4.1.6
         if (message_flags & MESSAGE_FLAG_HAS_SOURCE) {
-            uint64_t node_id;
-            proto_tree_add_item_ret_uint64(matter_tree, hf_message_src_id, tvb, offset, 8, ENC_LITTLE_ENDIAN, &node_id);
-            col_append_fstr(pinfo->cinfo, COL_INFO, " Src=0x%016" PRIx64, node_id);
+            proto_tree_add_item_ret_uint64(matter_tree, hf_message_src_id, tvb, offset, 8, ENC_LITTLE_ENDIAN, &source_node_id);
+            col_append_fstr(pinfo->cinfo, COL_INFO, " Src=0x%016" PRIx64, source_node_id);
             offset += 8;
         }
 
@@ -405,10 +650,38 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
         offset += dissect_matter_payload(next_tvb, pinfo, payload_tree);
     } else {
-        // Secured sessions not yet supported in the dissector.
-        uint32_t payload_length = tvb_reported_length_remaining(tvb, offset) - CRYPTO_AEAD_MIC_LENGTH;
-        proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes)", payload_length);
-        proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, CRYPTO_AEAD_MIC_LENGTH, ENC_NA);
+        uint32_t payload_length = tvb_reported_length_remaining(tvb, offset) - MATTER_MIC_LEN;
+
+        /* Try to read keys from the key log file */
+        matter_keylog_read();
+
+        /* Look for a decryption key for this session */
+        const uint8_t *key = matter_find_session_key((uint16_t)session_id);
+        tvbuff_t *decrypted_tvb = NULL;
+
+        if (key != NULL) {
+            /* Build the nonce: security_flags || counter || source_node_id */
+            uint8_t nonce[MATTER_NONCE_LEN];
+            matter_build_nonce(security_flags, message_counter, source_node_id, nonce);
+
+            decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset, payload_length, key, nonce);
+        }
+
+        if (decrypted_tvb) {
+            /* Decryption succeeded - show decrypted payload */
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Decrypted Payload (%u bytes)", payload_length);
+            proto_tree *payload_tree = proto_item_add_subtree(payload_item, ett_payload);
+
+            proto_tree_add_item(matter_tree, hf_payload_decrypted, decrypted_tvb, 0, payload_length, ENC_NA);
+            dissect_matter_payload(decrypted_tvb, pinfo, payload_tree);
+
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+            col_append_str(pinfo->cinfo, COL_INFO, " [Decrypted]");
+        } else {
+            /* No key or decryption failed - show encrypted blob */
+            proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes)", payload_length);
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+        }
     }
 
     return tvb_captured_length(tvb);
@@ -768,6 +1041,11 @@ proto_register_matter(void)
             FT_NONE, BASE_NONE, NULL, 0,
             "Message Payload", HFILL }
         },
+        { &hf_payload_decrypted,
+          { "Decrypted Payload", "matter.payload.decrypted",
+            FT_BYTES, BASE_NONE, NULL, 0,
+            "Decrypted message payload", HFILL }
+        },
         { &hf_payload_mic,
           { "Integrity Check", "matter.payload.mic",
             FT_BYTES, BASE_NONE, NULL, 0,
@@ -955,6 +1233,16 @@ proto_register_matter(void)
     expert_module_t *expert = expert_register_protocol(proto_matter);
     expert_register_field_array(expert, ei, array_length(ei));
 
+    module_t *matter_module = prefs_register_protocol(proto_matter, NULL);
+    prefs_register_filename_preference(matter_module, "keylog_file", "Key log filename",
+        "The path to a file containing Matter session keys for decryption.\n"
+        "Each line should have the format:\n"
+        "  SESSION_KEY <session_id_hex> <32_hex_byte_key>\n"
+        "Example:\n"
+        "  SESSION_KEY 0x1234 a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4\n",
+        &pref_keylog_file, false);
+
+    register_shutdown_routine(matter_keylog_reset);
 }
 
 void
