@@ -75,6 +75,10 @@ static int hf_matter_tlv_elem_control;
 static int hf_matter_tlv_elem_control_tag_format;
 static int hf_matter_tlv_elem_control_element_type;
 static int hf_matter_tlv_elem_tag;
+static int hf_matter_tlv_elem_tag_vendor_id;
+static int hf_matter_tlv_elem_tag_profile;
+static int hf_matter_tlv_elem_tag_number_16;
+static int hf_matter_tlv_elem_tag_number_32;
 static int hf_matter_tlv_elem_length;
 static int hf_matter_tlv_elem_value_int;
 static int hf_matter_tlv_elem_value_uint;
@@ -533,6 +537,38 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
             proto_tree_add_item(tree_element, matter_tlv_elem_tag, tvb, offset, 1, ENC_NA);
             offset += 1;
             break;
+        case 2: // Common Profile Tag Form, 2-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_16, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            break;
+        case 3: // Common Profile Tag Form, 4-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_32, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+            offset += 4;
+            break;
+        case 4: // Implicit Profile Tag Form, 2-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_16, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            break;
+        case 5: // Implicit Profile Tag Form, 4-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_32, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+            offset += 4;
+            break;
+        case 6: // Fully-qualified Tag Form, 6 octets (vendor 2 + profile 2 + tag 2)
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_profile, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_16, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            break;
+        case 7: // Fully-qualified Tag Form, 8 octets (vendor 2 + profile 2 + tag 4)
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_profile, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_32, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+            offset += 4;
+            break;
         default:
             goto unsupported_control;
         }
@@ -803,7 +839,27 @@ proto_register_matter(void)
         { &hf_matter_tlv_elem_tag,
           { "Tag", "matter.tlv.tag",
             FT_UINT32, BASE_HEX, NULL, 0x0,
-            NULL, HFILL }
+            "Context-specific tag number", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_vendor_id,
+          { "Tag Vendor ID", "matter.tlv.tag_vendor",
+            FT_UINT16, BASE_HEX, NULL, 0x0,
+            "Vendor ID portion of a fully-qualified tag", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_profile,
+          { "Tag Profile Number", "matter.tlv.tag_profile",
+            FT_UINT16, BASE_HEX, NULL, 0x0,
+            "Profile number portion of a fully-qualified tag", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_number_16,
+          { "Tag Number", "matter.tlv.tag_number",
+            FT_UINT16, BASE_DEC_HEX, NULL, 0x0,
+            "16-bit tag number", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_number_32,
+          { "Tag Number", "matter.tlv.tag_number32",
+            FT_UINT32, BASE_DEC_HEX, NULL, 0x0,
+            "32-bit tag number", HFILL }
         },
         { &hf_matter_tlv_elem_length,
           { "Length", "matter.tlv.length",
