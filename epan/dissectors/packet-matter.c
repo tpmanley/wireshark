@@ -26,6 +26,7 @@
 #include <epan/expert.h>
 #include <epan/packet.h>
 #include <epan/prefs.h>
+#include <epan/uat.h>
 #include <wsutil/array.h>
 #include <wsutil/file_util.h>
 #include <wsutil/filesystem.h>
@@ -38,6 +39,7 @@ void proto_register_matter(void);
 
 static int  dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
 static int  dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
+static bool hex_to_bytes(const char *hex, uint8_t *out, unsigned len);
 
 /* Initialize the protocol and registered fields */
 static dissector_handle_t matter_handle;
@@ -132,6 +134,108 @@ static matter_session_key_t *session_keys;
 static unsigned              session_key_count;
 static const char           *pref_keylog_file;
 static FILE                 *matter_keylog_file;
+
+/*
+ * UAT (User Accessible Table) for entering CASE/PASE session keys
+ * directly via the Wireshark Preferences dialog.
+ *
+ * Each row holds a session ID and the I2R (Initiator-to-Responder) and/or
+ * R2I (Responder-to-Initiator) 128-bit AES keys in hex.  When decrypting,
+ * the dissector tries both keys and uses whichever one passes MIC
+ * verification.
+ */
+typedef struct {
+    char *session_id_str;  /* hex session ID, e.g. "002A" */
+    char *i2r_key;         /* 32 hex chars (16 bytes) or empty */
+    char *r2i_key;         /* 32 hex chars (16 bytes) or empty */
+} matter_key_uat_record_t;
+
+static matter_key_uat_record_t *matter_key_uat_records;
+static unsigned                 num_matter_key_uat_records;
+
+static void *
+matter_key_uat_copy_cb(void *dest, const void *source, size_t len _U_)
+{
+    const matter_key_uat_record_t *s = (const matter_key_uat_record_t *)source;
+    matter_key_uat_record_t       *d = (matter_key_uat_record_t *)dest;
+    d->session_id_str = g_strdup(s->session_id_str);
+    d->i2r_key        = g_strdup(s->i2r_key);
+    d->r2i_key        = g_strdup(s->r2i_key);
+    return dest;
+}
+
+static bool
+matter_key_uat_update_cb(void *r, char **error)
+{
+    matter_key_uat_record_t *rec = (matter_key_uat_record_t *)r;
+
+    /* Validate session ID.
+     * Accept decimal (e.g. "42") or hex with 0x prefix (e.g. "0x002A").
+     * strtoul with base 0 handles both forms automatically. */
+    if (!rec->session_id_str || !*rec->session_id_str) {
+        *error = g_strdup("Session ID must not be empty");
+        return false;
+    }
+    char *endp = NULL;
+    unsigned long sid = strtoul(rec->session_id_str, &endp, 0);
+    if (endp == rec->session_id_str || *endp != '\0') {
+        *error = g_strdup("Session ID must be a number (decimal or 0x hex)");
+        return false;
+    }
+    if (sid > 0xFFFF) {
+        *error = g_strdup("Session ID must be a 16-bit value (0-65535 or 0x0000-0xFFFF)");
+        return false;
+    }
+
+    /* At least one key must be provided */
+    bool has_i2r = rec->i2r_key && *rec->i2r_key;
+    bool has_r2i = rec->r2i_key && *rec->r2i_key;
+    if (!has_i2r && !has_r2i) {
+        *error = g_strdup("At least one key (I2R or R2I) must be provided");
+        return false;
+    }
+
+    /* Validate key lengths and hex encoding */
+    if (has_i2r) {
+        if (strlen(rec->i2r_key) != 2 * MATTER_SESSION_KEY_LEN) {
+            *error = g_strdup("I2R key must be exactly 32 hex characters");
+            return false;
+        }
+        uint8_t tmp[MATTER_SESSION_KEY_LEN];
+        if (!hex_to_bytes(rec->i2r_key, tmp, MATTER_SESSION_KEY_LEN)) {
+            *error = g_strdup("I2R key contains invalid hex characters");
+            return false;
+        }
+    }
+    if (has_r2i) {
+        if (strlen(rec->r2i_key) != 2 * MATTER_SESSION_KEY_LEN) {
+            *error = g_strdup("R2I key must be exactly 32 hex characters");
+            return false;
+        }
+        uint8_t tmp[MATTER_SESSION_KEY_LEN];
+        if (!hex_to_bytes(rec->r2i_key, tmp, MATTER_SESSION_KEY_LEN)) {
+            *error = g_strdup("R2I key contains invalid hex characters");
+            return false;
+        }
+    }
+    return true;
+}
+
+static void
+matter_key_uat_free_cb(void *r)
+{
+    matter_key_uat_record_t *rec = (matter_key_uat_record_t *)r;
+    g_free(rec->session_id_str);
+    g_free(rec->i2r_key);
+    g_free(rec->r2i_key);
+}
+
+static void matter_key_uat_apply(void)  { /* Keys read on the fly during dissection */ }
+static void matter_key_uat_reset(void)  { /* Nothing to clean up */ }
+
+UAT_CSTRING_CB_DEF(matter_key_uat, session_id_str, matter_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_key_uat, i2r_key, matter_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_key_uat, r2i_key, matter_key_uat_record_t)
 
 static void
 matter_keylog_reset(void)
@@ -239,6 +343,50 @@ matter_find_session_key(uint16_t session_id)
             return session_keys[i].key;
     }
     return NULL;
+}
+
+/*
+ * Collect all candidate decryption keys for a given session ID.
+ *
+ * Checks the keylog-file table first, then the UAT table.  Returns the
+ * number of keys written into *keys (max *max_keys*).  Each entry
+ * points into static storage that is valid for the lifetime of the
+ * dissection pass.
+ */
+static uint8_t uat_key_buf[2 * MATTER_SESSION_KEY_LEN];  /* scratch space for UAT keys */
+
+static unsigned
+matter_collect_session_keys(uint16_t session_id,
+                            const uint8_t *keys[], unsigned max_keys)
+{
+    unsigned n = 0;
+
+    /* 1. Keylog-file key */
+    const uint8_t *kf_key = matter_find_session_key(session_id);
+    if (kf_key && n < max_keys)
+        keys[n++] = kf_key;
+
+    /* 2. UAT keys (I2R + R2I) */
+    for (unsigned i = 0; i < num_matter_key_uat_records && n < max_keys; i++) {
+        matter_key_uat_record_t *rec = &matter_key_uat_records[i];
+        if (!rec->session_id_str || !*rec->session_id_str)
+            continue;
+        unsigned long sid = strtoul(rec->session_id_str, NULL, 0);
+        if ((uint16_t)sid != session_id)
+            continue;
+
+        if (rec->i2r_key && strlen(rec->i2r_key) == 2 * MATTER_SESSION_KEY_LEN && n < max_keys) {
+            uint8_t *buf = &uat_key_buf[0];
+            if (hex_to_bytes(rec->i2r_key, buf, MATTER_SESSION_KEY_LEN))
+                keys[n++] = buf;
+        }
+        if (rec->r2i_key && strlen(rec->r2i_key) == 2 * MATTER_SESSION_KEY_LEN && n < max_keys) {
+            uint8_t *buf = &uat_key_buf[MATTER_SESSION_KEY_LEN];
+            if (hex_to_bytes(rec->r2i_key, buf, MATTER_SESSION_KEY_LEN))
+                keys[n++] = buf;
+        }
+    }
+    return n;
 }
 
 /*
@@ -707,16 +855,20 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         /* Try to read keys from the key log file */
         matter_keylog_read();
 
-        /* Look for a decryption key for this session */
-        const uint8_t *key = matter_find_session_key((uint16_t)session_id);
+        /* Collect all candidate keys (keylog file + UAT) and try each */
+        const uint8_t *candidate_keys[8];
+        unsigned num_keys = matter_collect_session_keys((uint16_t)session_id,
+                                                       candidate_keys,
+                                                       array_length(candidate_keys));
         tvbuff_t *decrypted_tvb = NULL;
 
-        if (key != NULL) {
-            /* Build the nonce: security_flags || counter || source_node_id */
-            uint8_t nonce[MATTER_NONCE_LEN];
-            matter_build_nonce(security_flags, message_counter, source_node_id, nonce);
+        uint8_t nonce[MATTER_NONCE_LEN];
+        matter_build_nonce(security_flags, message_counter, source_node_id, nonce);
 
-            decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset, payload_length, key, nonce);
+        for (unsigned ki = 0; ki < num_keys && !decrypted_tvb; ki++) {
+            decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset,
+                                                   payload_length,
+                                                   candidate_keys[ki], nonce);
         }
 
         if (decrypted_tvb) {
@@ -1293,6 +1445,40 @@ proto_register_matter(void)
         "Example:\n"
         "  SESSION_KEY 0x1234 a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4\n",
         &pref_keylog_file, false);
+
+    /* UAT for entering CASE session keys directly in preferences */
+    static uat_field_t matter_key_uat_fields[] = {
+        UAT_FLD_CSTRING(matter_key_uat, session_id_str, "Session ID",
+                        "16-bit session ID in decimal or hex (e.g. 42 or 0x002A)"),
+        UAT_FLD_CSTRING(matter_key_uat, i2r_key, "I2R Key",
+                        "Initiator-to-Responder AES-128 key (32 hex chars, or empty)"),
+        UAT_FLD_CSTRING(matter_key_uat, r2i_key, "R2I Key",
+                        "Responder-to-Initiator AES-128 key (32 hex chars, or empty)"),
+        UAT_END_FIELDS
+    };
+
+    uat_t *matter_keys_uat = uat_new("Matter CASE Session Keys",
+            sizeof(matter_key_uat_record_t),
+            "matter_session_keys",          /* filename */
+            true,                            /* from_profile */
+            &matter_key_uat_records,          /* data_ptr */
+            &num_matter_key_uat_records,      /* numitems_ptr */
+            UAT_AFFECTS_DISSECTION,           /* flags */
+            NULL,                            /* help (currently wiki page) */
+            matter_key_uat_copy_cb,
+            matter_key_uat_update_cb,
+            matter_key_uat_free_cb,
+            matter_key_uat_apply,
+            matter_key_uat_reset,
+            matter_key_uat_fields);
+
+    prefs_register_uat_preference(matter_module, "session_keys",
+            "CASE session keys",
+            "A table of Matter CASE/PASE session keys for decryption.\n"
+            "Enter the session ID (decimal or 0x-prefixed hex) and the I2R and/or R2I AES-128 key\n"
+            "(32 hex characters each). The dissector will try both keys and\n"
+            "use whichever one passes MIC verification.",
+            matter_keys_uat);
 
     register_shutdown_routine(matter_keylog_reset);
 }
