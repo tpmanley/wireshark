@@ -479,7 +479,12 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         offset += secured_ext_len;
     }
     uint32_t application_length = tvb_reported_length_remaining(tvb, offset);
-    proto_tree_add_bytes_format(pl_tree, hf_payload_application, tvb, offset, application_length, NULL, "Application payload (%u bytes)", application_length);
+    if (application_length > 0) {
+        proto_item *app_item = proto_tree_add_bytes_format(pl_tree, hf_payload_application, tvb, offset, application_length, NULL, "Application payload (%u bytes)", application_length);
+        proto_tree *app_tree = proto_item_add_subtree(app_item, ett_payload);
+        tvbuff_t *app_tvb = tvb_new_subset_length(tvb, offset, application_length);
+        dissect_matter_tlv(app_tvb, pinfo, app_tree, NULL);
+    }
     offset += application_length;
     return offset;
 }
