@@ -21,6 +21,8 @@
  * Specification Version 1.5.
  */
 
+#define WS_LOG_DOMAIN "packet-matter"
+
 #include <config.h>
 
 #include <epan/expert.h>
@@ -31,6 +33,7 @@
 #include <wsutil/file_util.h>
 #include <wsutil/filesystem.h>
 #include <wsutil/wsgcrypt.h>
+#include <wsutil/wslog.h>
 
 /* Prototypes */
 /* (Required to prevent [-Wmissing-prototypes] warnings */
@@ -108,6 +111,8 @@ static int ett_matter_tlv;
 static int ett_matter_tlv_control;
 
 static expert_field ei_matter_tlv_unsupported_control;
+static expert_field ei_matter_decryption_no_key;
+static expert_field ei_matter_decryption_failed;
 
 /*
  * Session key storage for decryption.
@@ -865,14 +870,30 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         uint8_t nonce[MATTER_NONCE_LEN];
         matter_build_nonce(security_flags, message_counter, source_node_id, nonce);
 
+        ws_debug("Session 0x%04x: %u candidate key(s), payload=%u bytes, "
+                 "nonce=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                 session_id, num_keys, payload_length,
+                 nonce[0], nonce[1], nonce[2], nonce[3], nonce[4],
+                 nonce[5], nonce[6], nonce[7], nonce[8], nonce[9],
+                 nonce[10], nonce[11], nonce[12]);
+
         for (unsigned ki = 0; ki < num_keys && !decrypted_tvb; ki++) {
+            ws_debug("  Trying key %u/%u: %02x%02x%02x%02x...%02x%02x%02x%02x",
+                     ki + 1, num_keys,
+                     candidate_keys[ki][0], candidate_keys[ki][1],
+                     candidate_keys[ki][2], candidate_keys[ki][3],
+                     candidate_keys[ki][12], candidate_keys[ki][13],
+                     candidate_keys[ki][14], candidate_keys[ki][15]);
             decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset,
                                                    payload_length,
                                                    candidate_keys[ki], nonce);
+            if (!decrypted_tvb)
+                ws_debug("  Key %u/%u: MIC verification failed", ki + 1, num_keys);
         }
 
         if (decrypted_tvb) {
             /* Decryption succeeded - show decrypted payload */
+            ws_debug("  Decryption succeeded for session 0x%04x", session_id);
             proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Decrypted Payload (%u bytes)", payload_length);
             proto_tree *payload_tree = proto_item_add_subtree(payload_item, ett_payload);
 
@@ -881,9 +902,18 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
             proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
             col_append_str(pinfo->cinfo, COL_INFO, " [Decrypted]");
+        } else if (num_keys > 0) {
+            /* Keys were found but none worked */
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [Decryption failed - %u key(s) tried]", payload_length, num_keys);
+            expert_add_info_format(pinfo, payload_item, &ei_matter_decryption_failed,
+                "Decryption failed for session 0x%04x: tried %u key(s), none passed MIC verification",
+                session_id, num_keys);
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
         } else {
-            /* No key or decryption failed - show encrypted blob */
-            proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes)", payload_length);
+            /* No key found for this session */
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [No key for session 0x%04x]", payload_length, session_id);
+            expert_add_info_format(pinfo, payload_item, &ei_matter_decryption_no_key,
+                "No decryption key configured for session 0x%04x", session_id);
             proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
         }
     }
@@ -1422,6 +1452,14 @@ proto_register_matter(void)
         { &ei_matter_tlv_unsupported_control,
           { "matter.tlv.control.unsupported", PI_UNDECODED, PI_WARN,
             "Unsupported Matter-TLV control byte", EXPFILL }
+        },
+        { &ei_matter_decryption_no_key,
+          { "matter.decryption.no_key", PI_DECRYPTION, PI_NOTE,
+            "No decryption key configured for this session", EXPFILL }
+        },
+        { &ei_matter_decryption_failed,
+          { "matter.decryption.failed", PI_DECRYPTION, PI_WARN,
+            "Decryption failed (MIC verification failed for all keys)", EXPFILL }
         },
     };
 
