@@ -591,6 +591,340 @@ static const value_string matter_tlv_elem_type_vals[] = {
     { 0, NULL }
 };
 
+/*
+ * Interaction Model TLV context annotation tables.
+ *
+ * When the application payload belongs to the Interaction Model protocol
+ * (protocol_id == 0x0001), the TLV context-specific tags carry semantic
+ * meaning defined by the spec (Sections 8.4-8.9).  The tables below map
+ * each (message-type, tag-number) pair to a human-readable field name and,
+ * for container tags (Structures/Arrays/Lists), the child context that
+ * should be used when recursing into the container.
+ */
+typedef enum {
+    MATTER_TLV_CONTEXT_NONE = 0,
+    /* IM action types (one per opcode) */
+    MATTER_TLV_CONTEXT_STATUS_RESPONSE,
+    MATTER_TLV_CONTEXT_READ_REQUEST,
+    MATTER_TLV_CONTEXT_SUBSCRIBE_REQUEST,
+    MATTER_TLV_CONTEXT_SUBSCRIBE_RESPONSE,
+    MATTER_TLV_CONTEXT_REPORT_DATA,
+    MATTER_TLV_CONTEXT_WRITE_REQUEST,
+    MATTER_TLV_CONTEXT_WRITE_RESPONSE,
+    MATTER_TLV_CONTEXT_INVOKE_REQUEST,
+    MATTER_TLV_CONTEXT_INVOKE_RESPONSE,
+    MATTER_TLV_CONTEXT_TIMED_REQUEST,
+    /* IM Information Blocks (sub-structures) */
+    MATTER_TLV_CONTEXT_ATTRIBUTE_PATH,
+    MATTER_TLV_CONTEXT_EVENT_PATH,
+    MATTER_TLV_CONTEXT_COMMAND_PATH,
+    MATTER_TLV_CONTEXT_COMMAND_DATA,
+    MATTER_TLV_CONTEXT_INVOKE_RESPONSE_IB,
+    MATTER_TLV_CONTEXT_COMMAND_STATUS,
+    MATTER_TLV_CONTEXT_STATUS_IB,
+    MATTER_TLV_CONTEXT_ATTRIBUTE_REPORT,
+    MATTER_TLV_CONTEXT_ATTRIBUTE_STATUS,
+    MATTER_TLV_CONTEXT_ATTRIBUTE_DATA,
+    MATTER_TLV_CONTEXT_EVENT_REPORT,
+    MATTER_TLV_CONTEXT_EVENT_STATUS,
+    MATTER_TLV_CONTEXT_EVENT_DATA,
+    MATTER_TLV_CONTEXT_DATA_VERSION_FILTER,
+    MATTER_TLV_CONTEXT_CLUSTER_PATH,
+    MATTER_TLV_CONTEXT_EVENT_FILTER,
+} matter_tlv_context_id_t;
+
+typedef struct {
+    uint8_t                  tag;
+    const char              *name;
+    matter_tlv_context_id_t  child_context; /* for containers; NONE for leaves */
+} matter_tlv_tag_info_t;
+
+/* --- IM Action Types --- */
+
+// Section 8.9.2.6: StatusResponseMessage
+static const matter_tlv_tag_info_t im_status_response_tags[] = {
+    { 0,    "Status",                    MATTER_TLV_CONTEXT_NONE },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.4.3.1: ReadRequestMessage
+static const matter_tlv_tag_info_t im_read_request_tags[] = {
+    { 0,    "AttributeRequests",         MATTER_TLV_CONTEXT_ATTRIBUTE_PATH },
+    { 1,    "EventRequests",             MATTER_TLV_CONTEXT_EVENT_PATH },
+    { 2,    "EventFilters",              MATTER_TLV_CONTEXT_EVENT_FILTER },
+    { 3,    "FabricFiltered",            MATTER_TLV_CONTEXT_NONE },
+    { 4,    "DataVersionFilters",        MATTER_TLV_CONTEXT_DATA_VERSION_FILTER },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.5.3.1: SubscribeRequestMessage
+static const matter_tlv_tag_info_t im_subscribe_request_tags[] = {
+    { 0,    "KeepSubscriptions",         MATTER_TLV_CONTEXT_NONE },
+    { 1,    "MinIntervalFloor",          MATTER_TLV_CONTEXT_NONE },
+    { 2,    "MaxIntervalCeiling",        MATTER_TLV_CONTEXT_NONE },
+    { 3,    "AttributeRequests",         MATTER_TLV_CONTEXT_ATTRIBUTE_PATH },
+    { 4,    "EventRequests",             MATTER_TLV_CONTEXT_EVENT_PATH },
+    { 5,    "EventFilters",              MATTER_TLV_CONTEXT_EVENT_FILTER },
+    { 7,    "FabricFiltered",            MATTER_TLV_CONTEXT_NONE },
+    { 8,    "DataVersionFilters",        MATTER_TLV_CONTEXT_DATA_VERSION_FILTER },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.5.3.2: SubscribeResponseMessage
+static const matter_tlv_tag_info_t im_subscribe_response_tags[] = {
+    { 0,    "SubscriptionId",            MATTER_TLV_CONTEXT_NONE },
+    { 2,    "MaxInterval",               MATTER_TLV_CONTEXT_NONE },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.4.3.2: ReportDataMessage
+static const matter_tlv_tag_info_t im_report_data_tags[] = {
+    { 0,    "SubscriptionId",            MATTER_TLV_CONTEXT_NONE },
+    { 1,    "AttributeReports",          MATTER_TLV_CONTEXT_ATTRIBUTE_REPORT },
+    { 2,    "EventReports",              MATTER_TLV_CONTEXT_EVENT_REPORT },
+    { 3,    "MoreChunkedMessages",       MATTER_TLV_CONTEXT_NONE },
+    { 4,    "SuppressResponse",          MATTER_TLV_CONTEXT_NONE },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.7.3.1: WriteRequestMessage
+static const matter_tlv_tag_info_t im_write_request_tags[] = {
+    { 0,    "SuppressResponse",          MATTER_TLV_CONTEXT_NONE },
+    { 1,    "TimedRequest",              MATTER_TLV_CONTEXT_NONE },
+    { 2,    "WriteRequests",             MATTER_TLV_CONTEXT_ATTRIBUTE_DATA },
+    { 3,    "MoreChunkedMessages",       MATTER_TLV_CONTEXT_NONE },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.7.3.2: WriteResponseMessage
+static const matter_tlv_tag_info_t im_write_response_tags[] = {
+    { 0,    "WriteResponses",            MATTER_TLV_CONTEXT_ATTRIBUTE_STATUS },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.8.3.1: InvokeRequestMessage
+static const matter_tlv_tag_info_t im_invoke_request_tags[] = {
+    { 0,    "SuppressResponse",          MATTER_TLV_CONTEXT_NONE },
+    { 1,    "TimedRequest",              MATTER_TLV_CONTEXT_NONE },
+    { 2,    "InvokeRequests",            MATTER_TLV_CONTEXT_COMMAND_DATA },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.8.3.2: InvokeResponseMessage
+static const matter_tlv_tag_info_t im_invoke_response_tags[] = {
+    { 0,    "SuppressResponse",          MATTER_TLV_CONTEXT_NONE },
+    { 1,    "InvokeResponses",           MATTER_TLV_CONTEXT_INVOKE_RESPONSE_IB },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.6.6: TimedRequestMessage
+static const matter_tlv_tag_info_t im_timed_request_tags[] = {
+    { 0,    "Timeout",                   MATTER_TLV_CONTEXT_NONE },
+    { 0xFF, "InteractionModelRevision",  MATTER_TLV_CONTEXT_NONE },
+};
+
+/* --- IM Information Blocks (Sub-structures) --- */
+
+// Section 8.9.2.7: AttributePathIB
+static const matter_tlv_tag_info_t im_attribute_path_tags[] = {
+    { 0,    "EnableTagCompression",      MATTER_TLV_CONTEXT_NONE },
+    { 1,    "Node",                      MATTER_TLV_CONTEXT_NONE },
+    { 2,    "Endpoint",                  MATTER_TLV_CONTEXT_NONE },
+    { 3,    "Cluster",                   MATTER_TLV_CONTEXT_NONE },
+    { 4,    "Attribute",                 MATTER_TLV_CONTEXT_NONE },
+    { 5,    "ListIndex",                 MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.8: EventPathIB
+static const matter_tlv_tag_info_t im_event_path_tags[] = {
+    { 0,    "Node",                      MATTER_TLV_CONTEXT_NONE },
+    { 1,    "Endpoint",                  MATTER_TLV_CONTEXT_NONE },
+    { 2,    "Cluster",                   MATTER_TLV_CONTEXT_NONE },
+    { 3,    "Event",                     MATTER_TLV_CONTEXT_NONE },
+    { 4,    "IsUrgent",                  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.9: EventFilterIB
+static const matter_tlv_tag_info_t im_event_filter_tags[] = {
+    { 0,    "Node",                      MATTER_TLV_CONTEXT_NONE },
+    { 1,    "EventMin",                  MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.10: CommandPathIB
+static const matter_tlv_tag_info_t im_command_path_tags[] = {
+    { 0,    "Endpoint",                  MATTER_TLV_CONTEXT_NONE },
+    { 1,    "Cluster",                   MATTER_TLV_CONTEXT_NONE },
+    { 2,    "Command",                   MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.11: CommandDataIB
+static const matter_tlv_tag_info_t im_command_data_tags[] = {
+    { 0,    "CommandPath",               MATTER_TLV_CONTEXT_COMMAND_PATH },
+    { 1,    "CommandFields",             MATTER_TLV_CONTEXT_NONE },
+    { 2,    "CommandRef",                MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.12: InvokeResponseIB
+static const matter_tlv_tag_info_t im_invoke_response_ib_tags[] = {
+    { 0,    "Command",                   MATTER_TLV_CONTEXT_COMMAND_DATA },
+    { 1,    "Status",                    MATTER_TLV_CONTEXT_COMMAND_STATUS },
+};
+
+// Section 8.9.2.13: CommandStatusIB
+static const matter_tlv_tag_info_t im_command_status_tags[] = {
+    { 0,    "CommandPath",               MATTER_TLV_CONTEXT_COMMAND_PATH },
+    { 1,    "Status",                    MATTER_TLV_CONTEXT_STATUS_IB },
+};
+
+// Section 8.9.2.14: DataVersionFilterIB
+static const matter_tlv_tag_info_t im_data_version_filter_tags[] = {
+    { 0,    "Path",                      MATTER_TLV_CONTEXT_CLUSTER_PATH },
+    { 1,    "DataVersion",               MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.15: AttributeDataIB
+static const matter_tlv_tag_info_t im_attribute_data_tags[] = {
+    { 0,    "DataVersion",               MATTER_TLV_CONTEXT_NONE },
+    { 1,    "Path",                      MATTER_TLV_CONTEXT_ATTRIBUTE_PATH },
+    { 2,    "Data",                      MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.16: AttributeStatusIB
+static const matter_tlv_tag_info_t im_attribute_status_tags[] = {
+    { 0,    "Path",                      MATTER_TLV_CONTEXT_ATTRIBUTE_PATH },
+    { 1,    "Status",                    MATTER_TLV_CONTEXT_STATUS_IB },
+};
+
+// Section 8.9.2.17: AttributeReportIB
+static const matter_tlv_tag_info_t im_attribute_report_tags[] = {
+    { 0,    "AttributeStatus",           MATTER_TLV_CONTEXT_ATTRIBUTE_STATUS },
+    { 1,    "AttributeData",             MATTER_TLV_CONTEXT_ATTRIBUTE_DATA },
+};
+
+// Section 8.9.2.18: EventDataIB
+static const matter_tlv_tag_info_t im_event_data_tags[] = {
+    { 0,    "Path",                      MATTER_TLV_CONTEXT_EVENT_PATH },
+    { 1,    "EventNumber",               MATTER_TLV_CONTEXT_NONE },
+    { 2,    "Priority",                  MATTER_TLV_CONTEXT_NONE },
+    { 3,    "EpochTimestamp",            MATTER_TLV_CONTEXT_NONE },
+    { 4,    "SystemTimestamp",           MATTER_TLV_CONTEXT_NONE },
+    { 5,    "DeltaEpochTimestamp",       MATTER_TLV_CONTEXT_NONE },
+    { 6,    "DeltaSystemTimestamp",      MATTER_TLV_CONTEXT_NONE },
+    { 0xFE, "Data",                      MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 8.9.2.19: EventStatusIB
+static const matter_tlv_tag_info_t im_event_status_tags[] = {
+    { 0,    "Path",                      MATTER_TLV_CONTEXT_EVENT_PATH },
+    { 1,    "Status",                    MATTER_TLV_CONTEXT_STATUS_IB },
+};
+
+// Section 8.9.2.20: EventReportIB
+static const matter_tlv_tag_info_t im_event_report_tags[] = {
+    { 0,    "EventStatus",               MATTER_TLV_CONTEXT_EVENT_STATUS },
+    { 1,    "EventData",                 MATTER_TLV_CONTEXT_EVENT_DATA },
+};
+
+// Section 8.9.2.5: StatusIB
+static const matter_tlv_tag_info_t im_status_ib_tags[] = {
+    { 0,    "Status",                    MATTER_TLV_CONTEXT_NONE },
+    { 1,    "ClusterStatus",             MATTER_TLV_CONTEXT_NONE },
+};
+
+// ClusterPathIB (subset of AttributePathIB)
+static const matter_tlv_tag_info_t im_cluster_path_tags[] = {
+    { 0,    "Node",                      MATTER_TLV_CONTEXT_NONE },
+    { 1,    "Endpoint",                  MATTER_TLV_CONTEXT_NONE },
+    { 2,    "Cluster",                   MATTER_TLV_CONTEXT_NONE },
+};
+
+/* Master context lookup table */
+typedef struct {
+    matter_tlv_context_id_t     context_id;
+    const matter_tlv_tag_info_t *tags;
+    unsigned                     num_tags;
+} matter_tlv_context_def_t;
+
+static const matter_tlv_context_def_t matter_tlv_contexts[] = {
+    /* IM action types */
+    { MATTER_TLV_CONTEXT_STATUS_RESPONSE,    im_status_response_tags,    array_length(im_status_response_tags) },
+    { MATTER_TLV_CONTEXT_READ_REQUEST,       im_read_request_tags,       array_length(im_read_request_tags) },
+    { MATTER_TLV_CONTEXT_SUBSCRIBE_REQUEST,  im_subscribe_request_tags,  array_length(im_subscribe_request_tags) },
+    { MATTER_TLV_CONTEXT_SUBSCRIBE_RESPONSE, im_subscribe_response_tags, array_length(im_subscribe_response_tags) },
+    { MATTER_TLV_CONTEXT_REPORT_DATA,        im_report_data_tags,        array_length(im_report_data_tags) },
+    { MATTER_TLV_CONTEXT_WRITE_REQUEST,      im_write_request_tags,      array_length(im_write_request_tags) },
+    { MATTER_TLV_CONTEXT_WRITE_RESPONSE,     im_write_response_tags,     array_length(im_write_response_tags) },
+    { MATTER_TLV_CONTEXT_INVOKE_REQUEST,     im_invoke_request_tags,     array_length(im_invoke_request_tags) },
+    { MATTER_TLV_CONTEXT_INVOKE_RESPONSE,    im_invoke_response_tags,    array_length(im_invoke_response_tags) },
+    { MATTER_TLV_CONTEXT_TIMED_REQUEST,      im_timed_request_tags,      array_length(im_timed_request_tags) },
+    /* IM Information Blocks */
+    { MATTER_TLV_CONTEXT_ATTRIBUTE_PATH,     im_attribute_path_tags,     array_length(im_attribute_path_tags) },
+    { MATTER_TLV_CONTEXT_EVENT_PATH,         im_event_path_tags,         array_length(im_event_path_tags) },
+    { MATTER_TLV_CONTEXT_COMMAND_PATH,       im_command_path_tags,       array_length(im_command_path_tags) },
+    { MATTER_TLV_CONTEXT_COMMAND_DATA,       im_command_data_tags,       array_length(im_command_data_tags) },
+    { MATTER_TLV_CONTEXT_INVOKE_RESPONSE_IB, im_invoke_response_ib_tags, array_length(im_invoke_response_ib_tags) },
+    { MATTER_TLV_CONTEXT_COMMAND_STATUS,     im_command_status_tags,     array_length(im_command_status_tags) },
+    { MATTER_TLV_CONTEXT_STATUS_IB,          im_status_ib_tags,          array_length(im_status_ib_tags) },
+    { MATTER_TLV_CONTEXT_ATTRIBUTE_REPORT,   im_attribute_report_tags,   array_length(im_attribute_report_tags) },
+    { MATTER_TLV_CONTEXT_ATTRIBUTE_STATUS,   im_attribute_status_tags,   array_length(im_attribute_status_tags) },
+    { MATTER_TLV_CONTEXT_ATTRIBUTE_DATA,     im_attribute_data_tags,     array_length(im_attribute_data_tags) },
+    { MATTER_TLV_CONTEXT_EVENT_REPORT,       im_event_report_tags,       array_length(im_event_report_tags) },
+    { MATTER_TLV_CONTEXT_EVENT_STATUS,       im_event_status_tags,       array_length(im_event_status_tags) },
+    { MATTER_TLV_CONTEXT_EVENT_DATA,         im_event_data_tags,         array_length(im_event_data_tags) },
+    { MATTER_TLV_CONTEXT_DATA_VERSION_FILTER, im_data_version_filter_tags, array_length(im_data_version_filter_tags) },
+    { MATTER_TLV_CONTEXT_CLUSTER_PATH,       im_cluster_path_tags,       array_length(im_cluster_path_tags) },
+    { MATTER_TLV_CONTEXT_EVENT_FILTER,       im_event_filter_tags,       array_length(im_event_filter_tags) },
+};
+
+/*
+ * Look up a context-specific tag name within an IM TLV context.
+ * Returns the human-readable field name, or NULL if not found.
+ * If child_ctx is non-NULL it is set to the child context for containers.
+ */
+static const char *
+matter_tlv_tag_name(matter_tlv_context_id_t ctx, uint8_t tag,
+                    matter_tlv_context_id_t *child_ctx)
+{
+    for (unsigned i = 0; i < array_length(matter_tlv_contexts); i++) {
+        if (matter_tlv_contexts[i].context_id == ctx) {
+            const matter_tlv_tag_info_t *tags = matter_tlv_contexts[i].tags;
+            for (unsigned j = 0; j < matter_tlv_contexts[i].num_tags; j++) {
+                if (tags[j].tag == tag) {
+                    if (child_ctx)
+                        *child_ctx = tags[j].child_context;
+                    return tags[j].name;
+                }
+            }
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Map an Interaction Model protocol opcode to the TLV context
+ * for annotating the top-level application payload.
+ */
+static matter_tlv_context_id_t
+matter_im_opcode_context(uint32_t protocol_id, uint32_t opcode)
+{
+    if (protocol_id != 0x0001) /* Only Interaction Model */
+        return MATTER_TLV_CONTEXT_NONE;
+    switch (opcode) {
+    case 0x01: return MATTER_TLV_CONTEXT_STATUS_RESPONSE;
+    case 0x02: return MATTER_TLV_CONTEXT_READ_REQUEST;
+    case 0x03: return MATTER_TLV_CONTEXT_SUBSCRIBE_REQUEST;
+    case 0x04: return MATTER_TLV_CONTEXT_SUBSCRIBE_RESPONSE;
+    case 0x05: return MATTER_TLV_CONTEXT_REPORT_DATA;
+    case 0x06: return MATTER_TLV_CONTEXT_WRITE_REQUEST;
+    case 0x07: return MATTER_TLV_CONTEXT_WRITE_RESPONSE;
+    case 0x08: return MATTER_TLV_CONTEXT_INVOKE_REQUEST;
+    case 0x09: return MATTER_TLV_CONTEXT_INVOKE_RESPONSE;
+    case 0x0A: return MATTER_TLV_CONTEXT_TIMED_REQUEST;
+    default:   return MATTER_TLV_CONTEXT_NONE;
+    }
+}
+
 static int
 dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo, proto_tree *pl_tree);
 
@@ -954,7 +1288,8 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         proto_item *app_item = proto_tree_add_bytes_format(pl_tree, hf_payload_application, tvb, offset, application_length, NULL, "Application payload (%u bytes)", application_length);
         proto_tree *app_tree = proto_item_add_subtree(app_item, ett_payload);
         tvbuff_t *app_tvb = tvb_new_subset_length(tvb, offset, application_length);
-        dissect_matter_tlv(app_tvb, pinfo, app_tree, NULL);
+        matter_tlv_context_id_t im_ctx = matter_im_opcode_context(protocol_id, protocol_opcode);
+        dissect_matter_tlv(app_tvb, pinfo, app_tree, GINT_TO_POINTER(im_ctx));
     }
     offset += application_length;
     return offset;
@@ -970,13 +1305,14 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
     // the length is encoded in the lowest 2 bits of the control byte.
     static const int elem_sizes[] = { 1, 2, 4, 8 };
 
-    int matter_tlv_elem_tag = hf_matter_tlv_elem_tag;
     int length = tvb_reported_length_remaining(tvb, 0);
     int offset = 0;
 
-    if (data != NULL)
-        // Use caller-provided tag field.
-        matter_tlv_elem_tag = *((int *)data);
+    /* Extract IM TLV context from the data parameter.  When non-NULL the
+     * pointer encodes a matter_tlv_context_id_t via GINT_TO_POINTER. */
+    matter_tlv_context_id_t ctx = (data != NULL)
+        ? (matter_tlv_context_id_t)GPOINTER_TO_INT(data)
+        : MATTER_TLV_CONTEXT_NONE;
 
     while (offset < length) {
 
@@ -1005,14 +1341,29 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
         if (control_tag_format == 0 && control_element == 0x18)
             return offset;
 
+        /* child_ctx tracks the context to pass when recursing into
+         * containers.  For anonymous elements it inherits the parent
+         * context (correct for array elements); for context-specific
+         * tags it is looked up from the IM tag-info tables. */
+        matter_tlv_context_id_t child_ctx = MATTER_TLV_CONTEXT_NONE;
+
         switch (control_tag_format)
         {
         case 0: // Anonymous Tag Form (0 octets)
+            child_ctx = ctx;  /* array elements inherit parent context */
             break;
         case 1: // Context-specific Tag Form (1 octet)
-            proto_tree_add_item(tree_element, matter_tlv_elem_tag, tvb, offset, 1, ENC_NA);
+        {
+            uint8_t tag_val = tvb_get_uint8(tvb, offset);
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag, tvb, offset, 1, ENC_NA);
             offset += 1;
+            if (ctx != MATTER_TLV_CONTEXT_NONE) {
+                const char *tag_name = matter_tlv_tag_name(ctx, tag_val, &child_ctx);
+                if (tag_name)
+                    proto_item_append_text(ti_element, " (%s)", tag_name);
+            }
             break;
+        }
         case 2: // Common Profile Tag Form, 2-octet tag number
             proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_16, tvb, offset, 2, ENC_LITTLE_ENDIAN);
             offset += 2;
@@ -1114,7 +1465,7 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
         case 0x16: // Array
         case 0x17: // List
             increment_dissection_depth(pinfo);
-            offset += dissect_matter_tlv(tvb_new_subset_remaining(tvb, offset), pinfo, tree_element, data);
+            offset += dissect_matter_tlv(tvb_new_subset_remaining(tvb, offset), pinfo, tree_element, GINT_TO_POINTER(child_ctx));
             decrement_dissection_depth(pinfo);
             break;
         default:
