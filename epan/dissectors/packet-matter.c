@@ -36,6 +36,7 @@
 void proto_reg_handoff_matter(void);
 void proto_register_matter(void);
 
+static int  dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
 static int  dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
 
 /* Initialize the protocol and registered fields */
@@ -516,6 +517,57 @@ static const value_string matter_tlv_elem_type_vals[] = {
 
 static int
 dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo, proto_tree *pl_tree);
+
+/*
+ * Heuristic dissector for Matter over UDP.
+ *
+ * Validates the message header structure per Section 4.4 to decide
+ * whether a UDP payload is likely a Matter message:
+ *   - Minimum 8-byte header
+ *   - Version field (bits 4-7 of message flags) must be 0
+ *   - DSIZ field (bits 0-1) must be 0-3
+ *   - Session type (bits 0-1 of security flags) must be 0 or 1
+ *   - Expected minimum length based on DSIZ
+ */
+static bool
+dissect_matter_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
+{
+    /* Need at least the fixed header: message_flags(1) + session_id(2) +
+     * security_flags(1) + message_counter(4) = 8 bytes */
+    if (tvb_captured_length(tvb) < MATTER_MIN_LENGTH)
+        return false;
+
+    uint8_t message_flags = tvb_get_uint8(tvb, 0);
+
+    /* Version must be 0 (bits 4-7) */
+    uint8_t version = (message_flags >> 4) & 0x0F;
+    if (version != 0)
+        return false;
+
+    /* DSIZ (bits 0-1): 0=None, 1=16-bit Group, 2=32-bit Node, 3=64-bit Node */
+    uint8_t dsiz = message_flags & 0x03;
+
+    /* Check security flags byte */
+    uint8_t security_flags = tvb_get_uint8(tvb, 3);
+    uint8_t session_type = security_flags & 0x03;
+    /* Session type must be 0 (unicast) or 1 (group) */
+    if (session_type > 1)
+        return false;
+
+    /* Calculate expected minimum length based on header fields */
+    unsigned min_len = 8; /* fixed header */
+    bool has_source = (message_flags & 0x04) != 0;
+    if (has_source)
+        min_len += 8; /* 64-bit source node ID */
+    static const unsigned dsiz_len[] = { 0, 2, 8, 8 };
+    min_len += dsiz_len[dsiz];
+
+    if (tvb_captured_length(tvb) < min_len)
+        return false;
+
+    dissect_matter(tvb, pinfo, tree, data);
+    return true;
+}
 
 static int
 dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
@@ -1249,4 +1301,5 @@ void
 proto_reg_handoff_matter(void)
 {
     dissector_add_uint_with_preference("udp.port", MATTER_DEFAULT_PORT, matter_handle);
+    heur_dissector_add("udp", dissect_matter_heur, "Matter over UDP", "matter_udp", proto_matter, HEURISTIC_ENABLE);
 }
