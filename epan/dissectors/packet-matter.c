@@ -78,6 +78,7 @@ static int hf_matter_tlv_elem_tag;
 static int hf_matter_tlv_elem_length;
 static int hf_matter_tlv_elem_value_int;
 static int hf_matter_tlv_elem_value_uint;
+static int hf_matter_tlv_elem_value_string;
 static int hf_matter_tlv_elem_value_bytes;
 
 static int ett_matter;
@@ -471,6 +472,18 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
         case 0x08: // Boolean False
         case 0x09: // Boolean True
             break;
+        case 0x0C: // UTF-8 String (1-octet length)
+        case 0x0D: // UTF-8 String (2-octet length)
+        case 0x0E: // UTF-8 String (4-octet length)
+        case 0x0F: // UTF-8 String (8-octet length)
+        {
+            int size = elem_sizes[control_element & 0x03];
+            proto_tree_add_item_ret_uint64(tree_element, hf_matter_tlv_elem_length, tvb, offset, size, ENC_LITTLE_ENDIAN, &str_length);
+            offset += size;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_value_string, tvb, offset, (int)str_length, ENC_UTF_8);
+            offset += (int)str_length;
+            break;
+        }
         case 0x10: // Octet String (1-octet length)
         case 0x11: // Octet String (2-octet length)
         case 0x12: // Octet String (4-octet length)
@@ -703,6 +716,11 @@ proto_register_matter(void)
         { &hf_matter_tlv_elem_value_uint,
           { "Value", "matter.tlv.value_uint",
             FT_UINT64, BASE_DEC, NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_matter_tlv_elem_value_string,
+          { "Value", "matter.tlv.value_string",
+            FT_STRING, BASE_NONE, NULL, 0x0,
             NULL, HFILL }
         },
         { &hf_matter_tlv_elem_value_bytes,
