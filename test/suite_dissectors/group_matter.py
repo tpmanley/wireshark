@@ -18,22 +18,52 @@ import pytest
 
 
 def _make_matter_packet(proto_id=0x0000, opcode=0x01, sec_flags=0x00,
-                        exch_flags=0x05, tlv_bytes=b'', ext_data=None):
+                        exch_flags=0x05, tlv_bytes=b'', ext_data=None,
+                        session_id=0, counter=1, msg_flags=None,
+                        source_node_id=None, dest_node_id=None,
+                        dest_group_id=None, exchange_id=0, ack_counter=None):
     """Build an unsecured Matter packet with the given parameters."""
-    header = bytes([
-        0x00,                       # message flags
-        0x00, 0x00,                 # session ID (unsecured)
-        sec_flags,                  # security flags
-        0x01, 0x00, 0x00, 0x00,    # message counter
-    ])
+    # Build message flags
+    if msg_flags is not None:
+        mf = msg_flags
+    else:
+        mf = 0x00
+        if source_node_id is not None:
+            mf |= 0x04  # S flag
+        if dest_node_id is not None:
+            mf |= 0x01  # DSIZ = 01 (node64)
+        elif dest_group_id is not None:
+            mf |= 0x02  # DSIZ = 10 (group)
+
+    sec = sec_flags & 0xFF
     if ext_data is not None:
-        ext_len = len(ext_data)
-        header += struct.pack('<H', ext_len) + ext_data
-    exchange = bytes([
-        exch_flags,                 # exchange flags
-        opcode,                     # opcode
-        0x00, 0x00,                 # exchange ID
-    ]) + struct.pack('<H', proto_id)  # protocol ID
+        sec |= 0x20  # has_extensions
+
+    header = struct.pack('<B', mf)
+    header += struct.pack('<H', session_id)
+    header += struct.pack('<B', sec)
+    header += struct.pack('<I', counter)
+
+    if source_node_id is not None:
+        header += struct.pack('<Q', source_node_id)
+    if dest_node_id is not None:
+        header += struct.pack('<Q', dest_node_id)
+    elif dest_group_id is not None:
+        header += struct.pack('<H', dest_group_id)
+
+    if ext_data is not None:
+        header += struct.pack('<H', len(ext_data)) + ext_data
+
+    # Build exchange header
+    ef = exch_flags
+    if ack_counter is not None:
+        ef |= 0x02  # ACK flag
+    exchange = bytes([ef, opcode])
+    exchange += struct.pack('<H', exchange_id)
+    exchange += struct.pack('<H', proto_id)
+    if ack_counter is not None:
+        exchange += struct.pack('<I', ack_counter)
+
     return header + exchange + tlv_bytes
 
 
@@ -314,9 +344,141 @@ class TestMatterTlv:
             tlv, ['matter.tlv.value_uint'])
         assert result['matter.tlv.value_uint'] == '42'
 
+    # ── Additional TLV element types ──────────────────────────────────
+
+    def test_tlv_signed_int_negative(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """TLV signed 8-bit integer, context-specific tag, value -1."""
+        # control=0x20 (context tag, type=int8), tag=0x05, value=0xFF (-1)
+        tlv = bytes([0x20, 0x05, 0xFF])
+        result = _tshark_tlv_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            tlv, ['matter.tlv.value_int'])
+        assert result['matter.tlv.value_int'] == '-1'
+
+    def test_tlv_octet_string(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """TLV octet string, context-specific tag."""
+        # control=0x30 (context tag, type=octet string 1-byte len)
+        # tag=0x03, length=0x03, data=0xDE 0xAD 0xFF
+        tlv = bytes([0x30, 0x03, 0x03, 0xDE, 0xAD, 0xFF])
+        result = _tshark_tlv_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            tlv, ['matter.tlv.value_bytes', 'matter.tlv.length'])
+        assert result['matter.tlv.value_bytes'] == 'deadff'
+        assert result['matter.tlv.length'] == '3'
+
+    def test_tlv_boolean_true(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """TLV boolean true (element type 0x09)."""
+        # control=0x29 (context tag, type=bool true), tag=0x03
+        tlv = bytes([0x29, 0x03])
+        result = _tshark_tlv_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            tlv, ['matter.tlv.control.element'])
+        assert result['matter.tlv.control.element'] == '0x09'
+
+    def test_tlv_null(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """TLV null value (element type 0x14)."""
+        # control=0x34 (context tag, type=null), tag=0x10
+        tlv = bytes([0x34, 0x10])
+        result = _tshark_tlv_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            tlv, ['matter.tlv.control.element'])
+        assert result['matter.tlv.control.element'] == '0x14'
+
 
 class TestMatterProtocol:
     """Tests for Matter protocol dissection enhancements."""
+
+    # ── Basic message header parsing ──────────────────────────────────
+
+    def test_minimal_unsecured_header(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Minimal unsecured message: no source, no dest, session 0."""
+        pkt = _make_matter_packet(session_id=0, counter=42)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt,
+            ['matter.message.version',
+             'matter.message.session_id',
+             'matter.message.counter',
+             'matter.message.dsiz',
+             'matter.message.has_source_id'])
+        assert result['matter.message.version'] == '0'
+        assert result['matter.message.session_id'] == '0x0000'
+        assert result['matter.message.counter'] == '42'
+        assert result['matter.message.dsiz'] == '0'
+        assert result['matter.message.has_source_id'] in ('False', '0')
+
+    def test_source_and_dest_node_ids(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Message with both source and destination node IDs."""
+        pkt = _make_matter_packet(
+            session_id=0, counter=400,
+            source_node_id=1, dest_node_id=2,
+            proto_id=0x0001, opcode=0x01)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt,
+            ['matter.message.has_source_id',
+             'matter.message.dsiz',
+             'matter.message.src_id',
+             'matter.message.dest_node_id'])
+        assert result['matter.message.has_source_id'] in ('True', '1')
+        assert result['matter.message.dsiz'] == '1'
+        assert result['matter.message.src_id'] != ''
+        assert result['matter.message.dest_node_id'] != ''
+
+    def test_control_flag(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Control flag (0x40) in security flags byte."""
+        pkt = _make_matter_packet(session_id=0, counter=500, sec_flags=0x40)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt,
+            ['matter.message.is_control',
+             'matter.message.has_privacy',
+             'matter.message.session_type'])
+        assert result['matter.message.is_control'] in ('True', '1')
+        assert result['matter.message.has_privacy'] in ('False', '0')
+        assert result['matter.message.session_type'] == '0x00'
+
+    def test_exchange_header_fields(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Exchange flags, opcode, exchange ID and protocol ID are decoded."""
+        pkt = _make_matter_packet(
+            session_id=0, counter=600,
+            exch_flags=0x05,   # initiator + reliability
+            opcode=0x30,       # Sigma1
+            exchange_id=0xBEEF,
+            proto_id=0x0000)   # Secure Channel
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt,
+            ['matter.payload.exchange_flags',
+             'matter.payload.initiator',
+             'matter.payload.reliability',
+             'matter.payload.protocol_opcode',
+             'matter.payload.exchange_id',
+             'matter.payload.protocol_id'])
+        assert result['matter.payload.exchange_flags'] == '0x05'
+        assert result['matter.payload.initiator'] in ('True', '1')
+        assert result['matter.payload.reliability'] in ('True', '1')
+        assert result['matter.payload.protocol_opcode'] == '0x30'
+        assert result['matter.payload.exchange_id'] == '0xbeef'
+        assert result['matter.payload.protocol_id'] == '0x0000'
+
+    def test_ack_counter(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Acknowledged message counter field when ACK flag set."""
+        pkt = _make_matter_packet(
+            session_id=0, counter=700,
+            exch_flags=0x01, opcode=0x05,
+            exchange_id=0x0001, proto_id=0x0001,
+            ack_counter=999)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt,
+            ['matter.payload.ack_msg',
+             'matter.payload.ack_counter'])
+        assert result['matter.payload.ack_msg'] in ('True', '1')
+        assert result['matter.payload.ack_counter'] == '999'
+
+    def test_rejects_short_packet(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Packets shorter than 8 bytes should not be decoded as Matter."""
+        short_pkt = bytes([0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])  # 7 bytes
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, short_pkt,
+            ['matter.message.counter'])
+        assert result['matter.message.counter'] == ''
 
     # ── Protocol ID and opcode name resolution ────────────────────────
 
