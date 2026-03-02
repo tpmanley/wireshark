@@ -7,6 +7,8 @@ Tests for:
 1. TLV dissector: UTF-8 strings, float/double, tag forms 2-7, recursion guard
 2. Protocol dissection: opcode name resolution, protocol ID names,
    message extensions, application payload TLV parsing, return value fix
+3. Heuristic UDP dissector and default port 5540
+4. CASE/PASE session decryption via UAT preferences
 """
 
 import struct
@@ -675,3 +677,201 @@ class TestMatterHeuristic:
         ])
         assert not _heur_is_matter(
             cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+
+# ─── Helpers for decryption tests ─────────────────────────────────────
+#
+# Pre-computed AES-128-CCM encrypted Matter packets.
+#
+# All packets were encrypted with:
+#   KEY = 000102030405060708090a0b0c0d0e0f (16 bytes)
+#   tag_length = 16 (MATTER_MIC_LEN)
+#   nonce = security_flags(1) || counter(4 LE) || source_node_id(8 LE)
+#   AAD = raw message header bytes
+#
+# Plaintext is an exchange header: flags(1)+opcode(1)+exchange_id(2)+proto_id(2)
+# optionally followed by TLV application data.
+
+# session_id=0x002A, counter=1, proto_id=0x0001, opcode=0x01
+_ENC_PKT_BASIC = bytes.fromhex(
+    '002a0000010000003c468e1c9ba587642a6965cc57585f48c5b011ea8d94')
+
+# same as BASIC but plaintext also has TLV uint8=42 (0x04 0x2A)
+_ENC_PKT_TLV = bytes.fromhex(
+    '002a0000010000003c468e1c9ba5383e0b1b6b7c9b70b357a04e3baf53a89077')
+
+# session_id=0x002A, has_source=1, source_node_id=0xAABBCCDD11223344
+_ENC_PKT_SRC_NODE = bytes.fromhex(
+    '042a00000100000044332211ddccbbaa'
+    '8ed07003d46214f8d0214cf152369bd3a0c01c606a91')
+
+# session_id=100 (0x0064), counter=1, proto_id=0x0001, opcode=0x01
+_ENC_PKT_SID100 = bytes.fromhex(
+    '00640000010000003c468e1c9ba53d8d3edc8dd4af9279737599d7f3b58a')
+
+# session_id=0x002A, has_source=1, source_node_id=0x1122334455667788
+_ENC_PKT_INIT_NID = bytes.fromhex(
+    '042a000001000000887766554433221'
+    '1c2fcebdb5a590629801'
+    '9c7b893662a56a7918f6a5f42')
+
+_ENC_KEY_HEX = '000102030405060708090a0b0c0d0e0f'
+_ENC_SESSION_ID = 0x002A
+
+
+def _tshark_decrypt_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
+                           packet_bytes, fields,
+                           uat_entries=None, dst_port=5540):
+    """Write encrypted packet to pcap and extract fields via tshark with decryption.
+
+    Decryption keys are provided via uat_entries: a list of UAT row dicts
+    with keys: initiator_node_id, responder_node_id, i2r_key, r2i_key
+    """
+    hex_dump = "000000 " + " ".join(f"{b:02x}" for b in packet_bytes)
+
+    text_file = result_file('matter_decrypt_test.txt')
+    pcap_file = result_file('matter_decrypt_test.pcapng')
+
+    with open(text_file, 'w') as f:
+        f.write(hex_dump + "\n")
+
+    subprocess.check_call(
+        (cmd_text2pcap, '-u', f'1234,{dst_port}', text_file, pcap_file),
+        env=test_env,
+    )
+
+    args = [cmd_tshark, '-r', pcap_file, '-T', 'fields']
+    for field in fields:
+        args.extend(['-e', field])
+
+    if uat_entries:
+        for entry in uat_entries:
+            init_nid = entry.get('initiator_node_id', '')
+            resp_nid = entry.get('responder_node_id', '')
+            i2r = entry.get('i2r_key', '')
+            r2i = entry.get('r2i_key', '')
+            uat_row = f'"{init_nid}","{resp_nid}","{i2r}","{r2i}"'
+            args.extend(['-o', f'uat:matter_session_keys:{uat_row}'])
+
+    result = subprocess.run(
+        args, capture_output=True, check=True, encoding='utf-8', env=test_env,
+    )
+
+    values = result.stdout.strip().split('\t')
+    if len(values) == 1 and values[0] == '':
+        values = [''] * len(fields)
+    return dict(zip(fields, values))
+
+
+class TestMatterDecryption:
+    """Tests for CASE/PASE session decryption (MR4)."""
+
+    # ── UAT decryption ────────────────────────────────────────────────
+
+    def test_decrypt_via_uat_i2r_key(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Decryption using I2R key from UAT succeeds."""
+        uat = [{'i2r_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['_ws.col.Info'], uat_entries=uat)
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_decrypt_via_uat_r2i_key(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Decryption using R2I key from UAT succeeds."""
+        uat = [{'r2i_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['_ws.col.Info'], uat_entries=uat)
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_decrypt_uat_with_node_ids(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """UAT with node IDs constructs correct nonce for decryption."""
+        uat = [{'initiator_node_id': '0x1122334455667788',
+                'i2r_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_INIT_NID, ['_ws.col.Info'], uat_entries=uat)
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_decrypt_uat_tries_both_keys(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """When both I2R and R2I are provided, the correct one is found."""
+        uat = [{'i2r_key': '00' * 16,  # wrong key
+                'r2i_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['_ws.col.Info'], uat_entries=uat)
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_decrypt_shows_protocol_id(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """After decryption, the exchange header protocol ID is decoded."""
+        uat = [{'i2r_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['matter.payload.protocol_id'], uat_entries=uat)
+        assert result['matter.payload.protocol_id'] == '0x0001'
+
+    def test_decrypt_different_session_ids(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Keys are tried against all sessions regardless of session ID."""
+        uat = [{'i2r_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_SID100, ['_ws.col.Info'], uat_entries=uat)
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    # ── Expert info / failure cases ───────────────────────────────────
+
+    def test_no_key_expert_info(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Without any key, expert info 'no_key' is present."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['matter.decryption.no_key'])
+        assert result['matter.decryption.no_key'] != ''
+
+    def test_wrong_key_expert_info(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """With a wrong key, expert info 'failed' is present."""
+        uat = [{'i2r_key': 'ff' * 16}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['matter.decryption.failed'], uat_entries=uat)
+        assert result['matter.decryption.failed'] != ''
+
+    def test_no_decrypted_col_without_key(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Without decryption, [Decrypted] does NOT appear in col info."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['_ws.col.Info'])
+        assert '[Decrypted]' not in result['_ws.col.Info']
+
+    def test_mic_field_always_present(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """MIC field is shown for encrypted packets regardless of decryption."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['matter.payload.mic'])
+        assert result['matter.payload.mic'] != ''
+
+    # ── Decrypted payload TLV parsing ─────────────────────────────────
+
+    def test_decrypt_tlv_in_payload(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """After decryption, TLV data in the payload is parsed."""
+        uat = [{'i2r_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_TLV, ['matter.tlv.value_uint'], uat_entries=uat)
+        assert result['matter.tlv.value_uint'] == '42'
+
+    def test_decrypt_with_source_node_in_nonce(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Decryption works when source node ID is part of the nonce."""
+        uat = [{'i2r_key': _ENC_KEY_HEX}]
+
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_SRC_NODE, ['_ws.col.Info'], uat_entries=uat)
+        assert '[Decrypted]' in result['_ws.col.Info']

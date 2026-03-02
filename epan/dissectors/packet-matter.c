@@ -21,11 +21,19 @@
  * Specification Version 1.5.
  */
 
+#define WS_LOG_DOMAIN "packet-matter"
+
 #include <config.h>
 
 #include <epan/expert.h>
 #include <epan/packet.h>
+#include <epan/prefs.h>
+#include <epan/uat.h>
 #include <wsutil/array.h>
+#include <wsutil/file_util.h>
+#include <wsutil/filesystem.h>
+#include <wsutil/wsgcrypt.h>
+#include <wsutil/wslog.h>
 
 /* Prototypes */
 /* (Required to prevent [-Wmissing-prototypes] warnings */
@@ -34,6 +42,7 @@ void proto_register_matter(void);
 
 static int  dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
 static int  dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
+static bool hex_to_bytes(const char *hex, uint8_t *out, unsigned len);
 
 /* Initialize the protocol and registered fields */
 static dissector_handle_t matter_handle;
@@ -101,15 +110,325 @@ static int ett_matter_tlv;
 static int ett_matter_tlv_control;
 
 static expert_field ei_matter_tlv_unsupported_control;
+static expert_field ei_matter_decryption_no_key;
+static expert_field ei_matter_decryption_failed;
+
+/*
+ * Session key storage for decryption.
+ *
+ * Keys are loaded from a key log file with lines in the format:
+ *   SESSION_KEY <session_id_hex> <32_hex_bytes_of_key>
+ *
+ * For example:
+ *   SESSION_KEY 0x1234 a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+ *
+ * The session key can be exported from the Matter SDK by instrumenting
+ * the CASE session establishment code.
+ */
+#define MATTER_SESSION_KEY_LEN   16
+#define MATTER_NONCE_LEN         13
+#define MATTER_MIC_LEN           16  /* AES-128-CCM authentication tag */
+
+/*
+ * UAT (User Accessible Table) for entering CASE/PASE session keys
+ * directly via the Wireshark Preferences dialog.
+ *
+ * Each row holds the I2R (Initiator-to-Responder) and/or
+ * R2I (Responder-to-Initiator) 128-bit AES keys in hex, plus optional
+ * Initiator/Responder node IDs for nonce construction.  The dissector
+ * tries all UAT entries against every encrypted packet; only the
+ * entry whose key passes MIC verification is used.
+ */
+typedef struct {
+    char *initiator_node_id_str; /* 64-bit initiator node ID, hex with 0x prefix */
+    char *responder_node_id_str; /* 64-bit responder node ID, hex with 0x prefix */
+    char *i2r_key;               /* 32 hex chars (16 bytes) or empty */
+    char *r2i_key;               /* 32 hex chars (16 bytes) or empty */
+} matter_key_uat_record_t;
+
+static matter_key_uat_record_t *matter_key_uat_records;
+static unsigned                 num_matter_key_uat_records;
+
+static void *
+matter_key_uat_copy_cb(void *dest, const void *source, size_t len _U_)
+{
+    const matter_key_uat_record_t *s = (const matter_key_uat_record_t *)source;
+    matter_key_uat_record_t       *d = (matter_key_uat_record_t *)dest;
+    d->initiator_node_id_str = g_strdup(s->initiator_node_id_str);
+    d->responder_node_id_str = g_strdup(s->responder_node_id_str);
+    d->i2r_key              = g_strdup(s->i2r_key);
+    d->r2i_key              = g_strdup(s->r2i_key);
+    return dest;
+}
+
+static bool
+matter_key_uat_update_cb(void *r, char **error)
+{
+    matter_key_uat_record_t *rec = (matter_key_uat_record_t *)r;
+
+    /* Validate node IDs (optional, but if present must be valid hex) */
+    if (rec->initiator_node_id_str && *rec->initiator_node_id_str) {
+        char *endp2 = NULL;
+        (void)g_ascii_strtoull(rec->initiator_node_id_str, &endp2, 0);
+        if (endp2 == rec->initiator_node_id_str || *endp2 != '\0') {
+            *error = g_strdup("Initiator Node ID must be a number (decimal or 0x hex)");
+            return false;
+        }
+    }
+    if (rec->responder_node_id_str && *rec->responder_node_id_str) {
+        char *endp2 = NULL;
+        (void)g_ascii_strtoull(rec->responder_node_id_str, &endp2, 0);
+        if (endp2 == rec->responder_node_id_str || *endp2 != '\0') {
+            *error = g_strdup("Responder Node ID must be a number (decimal or 0x hex)");
+            return false;
+        }
+    }
+
+    /* At least one key must be provided */
+    bool has_i2r = rec->i2r_key && *rec->i2r_key;
+    bool has_r2i = rec->r2i_key && *rec->r2i_key;
+    if (!has_i2r && !has_r2i) {
+        *error = g_strdup("At least one key (I2R or R2I) must be provided");
+        return false;
+    }
+
+    /* Validate key lengths and hex encoding */
+    if (has_i2r) {
+        if (strlen(rec->i2r_key) != 2 * MATTER_SESSION_KEY_LEN) {
+            *error = g_strdup("I2R key must be exactly 32 hex characters");
+            return false;
+        }
+        uint8_t tmp[MATTER_SESSION_KEY_LEN];
+        if (!hex_to_bytes(rec->i2r_key, tmp, MATTER_SESSION_KEY_LEN)) {
+            *error = g_strdup("I2R key contains invalid hex characters");
+            return false;
+        }
+    }
+    if (has_r2i) {
+        if (strlen(rec->r2i_key) != 2 * MATTER_SESSION_KEY_LEN) {
+            *error = g_strdup("R2I key must be exactly 32 hex characters");
+            return false;
+        }
+        uint8_t tmp[MATTER_SESSION_KEY_LEN];
+        if (!hex_to_bytes(rec->r2i_key, tmp, MATTER_SESSION_KEY_LEN)) {
+            *error = g_strdup("R2I key contains invalid hex characters");
+            return false;
+        }
+    }
+    return true;
+}
+
+static void
+matter_key_uat_free_cb(void *r)
+{
+    matter_key_uat_record_t *rec = (matter_key_uat_record_t *)r;
+    g_free(rec->initiator_node_id_str);
+    g_free(rec->responder_node_id_str);
+    g_free(rec->i2r_key);
+    g_free(rec->r2i_key);
+}
+
+static void matter_key_uat_apply(void)  { /* Keys read on the fly during dissection */ }
+static void matter_key_uat_reset(void)  { /* Nothing to clean up */ }
+
+UAT_CSTRING_CB_DEF(matter_key_uat, initiator_node_id_str, matter_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_key_uat, responder_node_id_str, matter_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_key_uat, i2r_key, matter_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_key_uat, r2i_key, matter_key_uat_record_t)
+
+static bool
+hex_to_bytes(const char *hex, uint8_t *out, unsigned len)
+{
+    for (unsigned i = 0; i < len; i++) {
+        int hi = g_ascii_xdigit_value(hex[2 * i]);
+        int lo = g_ascii_xdigit_value(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0)
+            return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+/*
+ * A candidate decryption key together with the source node ID to use
+ * when constructing the nonce.  For I2R keys the source is the Initiator;
+ * for R2I keys it is the Responder.  A value of 0 means "use whatever
+ * source_node_id appeared in the message header".
+ */
+typedef struct {
+    const uint8_t *key;
+    uint64_t       source_node_id;
+    bool           has_node_id;   /* true if source_node_id was explicitly set */
+} matter_candidate_key_t;
+
+/*
+ * Collect all candidate decryption keys from the UAT.
+ *
+ * Every UAT entry is tried against every encrypted packet — session IDs
+ * are not used for matching.  Only MIC verification determines the
+ * correct key.  Returns the number of entries written into *candidates
+ * (max *max_keys*).
+ */
+#define MAX_UAT_ENTRIES 16
+static uint8_t uat_key_buf[MAX_UAT_ENTRIES * 2 * MATTER_SESSION_KEY_LEN];
+
+static unsigned
+matter_collect_session_keys(matter_candidate_key_t candidates[], unsigned max_keys)
+{
+    unsigned n = 0;
+
+    /* UAT keys (I2R + R2I) with per-direction node IDs */
+    for (unsigned i = 0; i < num_matter_key_uat_records && n < max_keys; i++) {
+        matter_key_uat_record_t *rec = &matter_key_uat_records[i];
+
+        /* Parse node IDs once per UAT row */
+        uint64_t initiator_nid = 0;
+        bool has_initiator_nid = false;
+        if (rec->initiator_node_id_str && *rec->initiator_node_id_str) {
+            initiator_nid = g_ascii_strtoull(rec->initiator_node_id_str, NULL, 0);
+            has_initiator_nid = true;
+        }
+        uint64_t responder_nid = 0;
+        bool has_responder_nid = false;
+        if (rec->responder_node_id_str && *rec->responder_node_id_str) {
+            responder_nid = g_ascii_strtoull(rec->responder_node_id_str, NULL, 0);
+            has_responder_nid = true;
+        }
+
+        if (rec->i2r_key && strlen(rec->i2r_key) == 2 * MATTER_SESSION_KEY_LEN && n < max_keys) {
+            uint8_t *buf = &uat_key_buf[(i * 2) * MATTER_SESSION_KEY_LEN];
+            if (hex_to_bytes(rec->i2r_key, buf, MATTER_SESSION_KEY_LEN)) {
+                candidates[n].key = buf;
+                candidates[n].source_node_id = initiator_nid;
+                candidates[n].has_node_id = has_initiator_nid;
+                n++;
+            }
+        }
+        if (rec->r2i_key && strlen(rec->r2i_key) == 2 * MATTER_SESSION_KEY_LEN && n < max_keys) {
+            uint8_t *buf = &uat_key_buf[(i * 2 + 1) * MATTER_SESSION_KEY_LEN];
+            if (hex_to_bytes(rec->r2i_key, buf, MATTER_SESSION_KEY_LEN)) {
+                candidates[n].key = buf;
+                candidates[n].source_node_id = responder_nid;
+                candidates[n].has_node_id = has_responder_nid;
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+/*
+ * Construct the Matter message nonce (13 bytes) per spec Section 4.7.2:
+ *   Nonce = security_flags (1) || message_counter (4 LE) || source_node_id (8 LE)
+ *
+ * For unicast sessions without a source node ID in the header, the source
+ * node ID is set to all zeros.
+ */
+static void
+matter_build_nonce(uint8_t security_flags, uint32_t message_counter,
+                   uint64_t source_node_id, uint8_t *nonce)
+{
+    nonce[0] = security_flags;
+    nonce[1] = (uint8_t)(message_counter);
+    nonce[2] = (uint8_t)(message_counter >> 8);
+    nonce[3] = (uint8_t)(message_counter >> 16);
+    nonce[4] = (uint8_t)(message_counter >> 24);
+    nonce[5]  = (uint8_t)(source_node_id);
+    nonce[6]  = (uint8_t)(source_node_id >> 8);
+    nonce[7]  = (uint8_t)(source_node_id >> 16);
+    nonce[8]  = (uint8_t)(source_node_id >> 24);
+    nonce[9]  = (uint8_t)(source_node_id >> 32);
+    nonce[10] = (uint8_t)(source_node_id >> 40);
+    nonce[11] = (uint8_t)(source_node_id >> 48);
+    nonce[12] = (uint8_t)(source_node_id >> 56);
+}
+
+/*
+ * Attempt AES-128-CCM decryption of a Matter secured message.
+ * Returns a new tvbuff_t with the decrypted payload on success, or NULL.
+ *
+ * The AAD (additional authenticated data) is the message header bytes
+ * from the start of the packet up to the encrypted payload.
+ */
+static tvbuff_t *
+matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
+                       uint32_t header_len, uint32_t payload_len,
+                       const uint8_t *key, const uint8_t *nonce)
+{
+    gcry_cipher_hd_t cipher_hd;
+    gcry_error_t gcrypt_err;
+    uint64_t ccm_lengths[3];
+
+    if (gcry_cipher_open(&cipher_hd, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_CCM, 0)) {
+        return NULL;
+    }
+
+    gcrypt_err = gcry_cipher_setkey(cipher_hd, key, MATTER_SESSION_KEY_LEN);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    gcrypt_err = gcry_cipher_setiv(cipher_hd, nonce, MATTER_NONCE_LEN);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* CCM lengths: [0]=payload, [1]=AAD, [2]=tag(MIC) */
+    ccm_lengths[0] = payload_len;
+    ccm_lengths[1] = header_len;
+    ccm_lengths[2] = MATTER_MIC_LEN;
+
+    gcrypt_err = gcry_cipher_ctl(cipher_hd, GCRYCTL_SET_CCM_LENGTHS, ccm_lengths, sizeof(ccm_lengths));
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* Authenticate the message header (AAD) */
+    gcrypt_err = gcry_cipher_authenticate(cipher_hd,
+        tvb_get_ptr(tvb, 0, header_len), header_len);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* Decrypt the payload */
+    uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, payload_len);
+    gcrypt_err = gcry_cipher_decrypt(cipher_hd, decrypted, payload_len,
+        tvb_get_ptr(tvb, header_len, payload_len), payload_len);
+    if (gcrypt_err != 0) {
+        gcry_cipher_close(cipher_hd);
+        return NULL;
+    }
+
+    /* Verify the MIC (authentication tag) */
+    uint8_t *tag = (uint8_t *)wmem_alloc(pinfo->pool, MATTER_MIC_LEN);
+    gcrypt_err = gcry_cipher_gettag(cipher_hd, tag, MATTER_MIC_LEN);
+    gcry_cipher_close(cipher_hd);
+
+    if (gcrypt_err != 0) {
+        return NULL;
+    }
+
+    const uint8_t *expected_mic = tvb_get_ptr(tvb, header_len + payload_len, MATTER_MIC_LEN);
+    if (memcmp(tag, expected_mic, MATTER_MIC_LEN) != 0) {
+        /* MIC mismatch - wrong key or corrupted message */
+        return NULL;
+    }
+
+    /* Create a tvbuff from the decrypted data */
+    tvbuff_t *decrypted_tvb = tvb_new_child_real_data(tvb, decrypted, payload_len, payload_len);
+    add_new_data_source(pinfo, decrypted_tvb, "Decrypted Matter Payload");
+    return decrypted_tvb;
+}
 
 // Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
 #define MATTER_DEFAULT_PORT 5540
 
 /* message flags + session ID + security flags + counter */
 #define MATTER_MIN_LENGTH 8
-
-// Section 3.6
-#define CRYPTO_AEAD_MIC_LENGTH 16
 
 // Section 4.4.1.2
 #define MESSAGE_FLAG_VERSION_MASK       0xF0
@@ -384,6 +703,8 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     uint8_t message_dsiz = 0;
     uint8_t message_session_type = 0;
     uint32_t session_id = 0;
+    uint32_t message_counter = 0;
+    uint64_t source_node_id = 0;
 
     /* Check that the packet is long enough for it to belong to us. */
     if (tvb_reported_length(tvb) < MATTER_MIN_LENGTH)
@@ -457,16 +778,14 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     } else {
 
         // Section 4.4.1.5
-        unsigned int message_counter;
         proto_tree_add_item_ret_uint(matter_tree, hf_message_counter, tvb, offset, 4, ENC_LITTLE_ENDIAN, &message_counter);
         col_append_fstr(pinfo->cinfo, COL_INFO, ": Counter=%u", message_counter);
         offset += 4;
 
         // Section 4.4.1.6
         if (message_flags & MESSAGE_FLAG_HAS_SOURCE) {
-            uint64_t node_id;
-            proto_tree_add_item_ret_uint64(matter_tree, hf_message_src_id, tvb, offset, 8, ENC_LITTLE_ENDIAN, &node_id);
-            col_append_fstr(pinfo->cinfo, COL_INFO, " Src=0x%016" PRIx64, node_id);
+            proto_tree_add_item_ret_uint64(matter_tree, hf_message_src_id, tvb, offset, 8, ENC_LITTLE_ENDIAN, &source_node_id);
+            col_append_fstr(pinfo->cinfo, COL_INFO, " Src=0x%016" PRIx64, source_node_id);
             offset += 8;
         }
 
@@ -503,10 +822,52 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
         offset += dissect_matter_payload(next_tvb, pinfo, payload_tree);
     } else {
-        // Secured sessions not yet supported in the dissector.
-        uint32_t payload_length = tvb_reported_length_remaining(tvb, offset) - CRYPTO_AEAD_MIC_LENGTH;
-        proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes)", payload_length);
-        proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, CRYPTO_AEAD_MIC_LENGTH, ENC_NA);
+        uint32_t payload_length = tvb_reported_length_remaining(tvb, offset) - MATTER_MIC_LEN;
+
+        /* Collect all candidate keys from UAT and try each */
+        matter_candidate_key_t candidates[MAX_UAT_ENTRIES * 2];
+        unsigned num_keys = matter_collect_session_keys(candidates,
+                                                       array_length(candidates));
+        tvbuff_t *decrypted_tvb = NULL;
+
+        for (unsigned ki = 0; ki < num_keys && !decrypted_tvb; ki++) {
+            /* Build a per-key nonce: use the candidate's source_node_id if
+             * explicitly provided (from UAT), otherwise fall back to
+             * whatever source_node_id appeared in the message header. */
+            uint64_t nonce_node_id = candidates[ki].has_node_id
+                                   ? candidates[ki].source_node_id
+                                   : source_node_id;
+            uint8_t nonce[MATTER_NONCE_LEN];
+            matter_build_nonce(security_flags, message_counter, nonce_node_id, nonce);
+
+            decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset,
+                                                   payload_length,
+                                                   candidates[ki].key, nonce);
+        }
+
+        if (decrypted_tvb) {
+            /* Decryption succeeded - show decrypted payload */
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Decrypted Payload (%u bytes)", payload_length);
+            proto_tree *payload_tree = proto_item_add_subtree(payload_item, ett_payload);
+
+            dissect_matter_payload(decrypted_tvb, pinfo, payload_tree);
+
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+            col_append_str(pinfo->cinfo, COL_INFO, " [Decrypted]");
+        } else if (num_keys > 0) {
+            /* Keys were found but none worked */
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [Decryption failed - %u key(s) tried]", payload_length, num_keys);
+            expert_add_info_format(pinfo, payload_item, &ei_matter_decryption_failed,
+                "Decryption failed: tried %u key(s), none passed MIC verification",
+                num_keys);
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+        } else {
+            /* No key found for this session */
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [No keys configured]", payload_length);
+            expert_add_info_format(pinfo, payload_item, &ei_matter_decryption_no_key,
+                "No decryption keys configured in Matter session keys table");
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+        }
     }
 
     return tvb_captured_length(tvb);
@@ -1039,6 +1400,14 @@ proto_register_matter(void)
           { "matter.tlv.control.unsupported", PI_UNDECODED, PI_WARN,
             "Unsupported Matter-TLV control byte", EXPFILL }
         },
+        { &ei_matter_decryption_no_key,
+          { "matter.decryption.no_key", PI_DECRYPTION, PI_NOTE,
+            "No decryption key configured for this session", EXPFILL }
+        },
+        { &ei_matter_decryption_failed,
+          { "matter.decryption.failed", PI_DECRYPTION, PI_WARN,
+            "Decryption failed (MIC verification failed for all keys)", EXPFILL }
+        },
     };
 
     /* Register the protocol name and description */
@@ -1053,6 +1422,46 @@ proto_register_matter(void)
     expert_module_t *expert = expert_register_protocol(proto_matter);
     expert_register_field_array(expert, ei, array_length(ei));
 
+    module_t *matter_module = prefs_register_protocol(proto_matter, NULL);
+    /* UAT for entering CASE session keys directly in preferences */
+    static uat_field_t matter_key_uat_fields[] = {
+        UAT_FLD_CSTRING(matter_key_uat, initiator_node_id_str, "Initiator Node ID",
+                        "64-bit node ID of the session Initiator in hex (e.g. 0xF3AD187FAE395763). "
+                        "Used in the nonce when decrypting with the I2R key."),
+        UAT_FLD_CSTRING(matter_key_uat, responder_node_id_str, "Responder Node ID",
+                        "64-bit node ID of the session Responder in hex (e.g. 0x73EC64A6E69AE0DF). "
+                        "Used in the nonce when decrypting with the R2I key."),
+        UAT_FLD_CSTRING(matter_key_uat, i2r_key, "I2R Key",
+                        "Initiator-to-Responder AES-128 key (32 hex chars, or empty)"),
+        UAT_FLD_CSTRING(matter_key_uat, r2i_key, "R2I Key",
+                        "Responder-to-Initiator AES-128 key (32 hex chars, or empty)"),
+        UAT_END_FIELDS
+    };
+
+    uat_t *matter_keys_uat = uat_new("Matter CASE Session Keys",
+            sizeof(matter_key_uat_record_t),
+            "matter_session_keys",           /* filename */
+            true,                            /* from_profile */
+            &matter_key_uat_records,         /* data_ptr */
+            &num_matter_key_uat_records,     /* numitems_ptr */
+            UAT_AFFECTS_DISSECTION,          /* flags */
+            NULL,                            /* help (currently wiki page) */
+            matter_key_uat_copy_cb,
+            matter_key_uat_update_cb,
+            matter_key_uat_free_cb,
+            matter_key_uat_apply,
+            matter_key_uat_reset,
+            matter_key_uat_fields);
+
+    prefs_register_uat_preference(matter_module, "session_keys",
+            "CASE session keys",
+            "A table of Matter CASE/PASE session keys for decryption.\n"
+            "Enter the Initiator and Responder node IDs (0x-prefixed hex)\n"
+            "and the I2R and/or R2I AES-128 keys (32 hex characters each).\n"
+            "Node IDs are needed for the decryption nonce when they are not\n"
+            "present in the message header. All entries are tried against\n"
+            "every secured packet; MIC verification determines the match.",
+            matter_keys_uat);
 }
 
 void
