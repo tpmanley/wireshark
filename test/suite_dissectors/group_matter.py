@@ -327,7 +327,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'Secure Channel: MRP Standalone Acknowledgement' in result['_ws.col.info']
+        assert 'MRP Standalone Acknowledgement' in result['_ws.col.info']
 
     def test_secure_channel_sigma1(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Secure Channel CASE Sigma1 opcode."""
@@ -335,7 +335,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'Secure Channel: CASE Sigma1' in result['_ws.col.info']
+        assert 'CASE Sigma1' in result['_ws.col.info']
 
     def test_im_read_request(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Interaction Model ReadRequest opcode."""
@@ -343,7 +343,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'Interaction Model: ReadRequest' in result['_ws.col.info']
+        assert 'ReadRequest' in result['_ws.col.info']
 
     def test_im_subscribe_request(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Interaction Model SubscribeRequest opcode."""
@@ -351,7 +351,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'Interaction Model: SubscribeRequest' in result['_ws.col.info']
+        assert 'SubscribeRequest' in result['_ws.col.info']
 
     def test_im_invoke_request(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Interaction Model InvokeRequest opcode."""
@@ -359,7 +359,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'Interaction Model: InvokeRequest' in result['_ws.col.info']
+        assert 'InvokeRequest' in result['_ws.col.info']
 
     def test_bdx_send_init(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """BDX SendInit opcode."""
@@ -367,7 +367,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'BDX (Bulk Data Exchange): SendInit' in result['_ws.col.info']
+        assert 'SendInit' in result['_ws.col.info']
 
     def test_udc_identification(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """UDC IdentificationDeclaration opcode."""
@@ -375,7 +375,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'User Directed Commissioning: IdentificationDeclaration' in result['_ws.col.info']
+        assert 'IdentificationDeclaration' in result['_ws.col.info']
 
     def test_unknown_protocol_shows_opcode_hex(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Unknown protocol ID falls back to hex opcode display."""
@@ -383,7 +383,7 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'Unknown: Opcode=0xab' in result['_ws.col.info']
+        assert 'Unknown: Opcode 0xab' in result['_ws.col.info']
 
     def test_unknown_opcode_in_known_protocol(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Known protocol with unrecognized opcode falls back to hex."""
@@ -392,7 +392,19 @@ class TestMatterProtocol:
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             pkt, ['_ws.col.info'])
-        assert 'Secure Channel: Opcode=0xff' in result['_ws.col.info']
+        assert 'Secure Channel: Opcode 0xff' in result['_ws.col.info']
+
+    def test_info_column_shows_cluster_name(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Info column appends cluster name when TLV contains a Cluster field."""
+        # ReadRequest (proto=0x0001, opcode=0x02) with TLV:
+        # Structure { tag0: Array [ Structure { tag3: uint8(6) } ] }
+        # Tag 3 in ATTRIBUTE_PATH context = "Cluster", value 6 = OnOff
+        tlv = bytes.fromhex('15 36 00 15 24 03 06 18 18 18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x02, tlv_bytes=tlv)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['_ws.col.info'])
+        assert result['_ws.col.info'] == 'ReadRequest (OnOff)'
 
     def test_protocol_id_value_string(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Protocol ID field uses value_string for name resolution."""
@@ -775,7 +787,7 @@ class TestMatterDecryption:
         result = _tshark_decrypt_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             _ENC_PKT_BASIC, ['_ws.col.Info'], uat_entries=uat)
-        assert '[Decrypted]' in result['_ws.col.Info']
+        assert result['_ws.col.Info'] == 'StatusResponse'
 
     def test_decrypt_via_uat_r2i_key(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Decryption using R2I key from UAT succeeds."""
@@ -784,7 +796,7 @@ class TestMatterDecryption:
         result = _tshark_decrypt_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             _ENC_PKT_BASIC, ['_ws.col.Info'], uat_entries=uat)
-        assert '[Decrypted]' in result['_ws.col.Info']
+        assert result['_ws.col.Info'] == 'StatusResponse'
 
     def test_decrypt_uat_with_node_ids(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """UAT with node IDs constructs correct nonce for decryption."""
@@ -794,7 +806,7 @@ class TestMatterDecryption:
         result = _tshark_decrypt_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             _ENC_PKT_INIT_NID, ['_ws.col.Info'], uat_entries=uat)
-        assert '[Decrypted]' in result['_ws.col.Info']
+        assert result['_ws.col.Info'] == 'StatusResponse'
 
     def test_decrypt_uat_tries_both_keys(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """When both I2R and R2I are provided, the correct one is found."""
@@ -804,7 +816,7 @@ class TestMatterDecryption:
         result = _tshark_decrypt_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             _ENC_PKT_BASIC, ['_ws.col.Info'], uat_entries=uat)
-        assert '[Decrypted]' in result['_ws.col.Info']
+        assert result['_ws.col.Info'] == 'StatusResponse'
 
     def test_decrypt_shows_protocol_id(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """After decryption, the exchange header protocol ID is decoded."""
@@ -822,7 +834,7 @@ class TestMatterDecryption:
         result = _tshark_decrypt_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             _ENC_PKT_SID100, ['_ws.col.Info'], uat_entries=uat)
-        assert '[Decrypted]' in result['_ws.col.Info']
+        assert result['_ws.col.Info'] == 'StatusResponse'
 
     # ── Expert info / failure cases ───────────────────────────────────
 
@@ -843,11 +855,11 @@ class TestMatterDecryption:
         assert result['matter.decryption.failed'] != ''
 
     def test_no_decrypted_col_without_key(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
-        """Without decryption, [Decrypted] does NOT appear in col info."""
+        """Without decryption, Info column shows session info, not opcode name."""
         result = _tshark_decrypt_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             _ENC_PKT_BASIC, ['_ws.col.Info'])
-        assert '[Decrypted]' not in result['_ws.col.Info']
+        assert 'Unicast Session' in result['_ws.col.Info']
 
     def test_mic_field_always_present(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """MIC field is shown for encrypted packets regardless of decryption."""
@@ -874,4 +886,4 @@ class TestMatterDecryption:
         result = _tshark_decrypt_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
             _ENC_PKT_SRC_NODE, ['_ws.col.Info'], uat_entries=uat)
-        assert '[Decrypted]' in result['_ws.col.Info']
+        assert result['_ws.col.Info'] == 'StatusResponse'

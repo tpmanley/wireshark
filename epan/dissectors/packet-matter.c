@@ -28,6 +28,7 @@
 #include <epan/expert.h>
 #include <epan/packet.h>
 #include <epan/prefs.h>
+#include <epan/proto_data.h>
 #include <epan/uat.h>
 #include <wsutil/array.h>
 #include <wsutil/file_util.h>
@@ -535,6 +536,121 @@ static const value_string *opcode_vals_by_protocol[] = {
     im_opcode_vals,   // 0x0001: Interaction Model
     bdx_opcode_vals,  // 0x0002: BDX
     udc_opcode_vals,  // 0x0003: User Directed Commissioning
+};
+
+// Matter Application Cluster IDs (Cluster Specification)
+static const value_string matter_cluster_id_vals[] = {
+    { 0x0003, "Identify" },
+    { 0x0004, "Groups" },
+    { 0x0005, "Scenes" },
+    { 0x0006, "OnOff" },
+    { 0x0008, "LevelControl" },
+    { 0x000F, "BinaryInputBasic" },
+    { 0x001D, "Descriptor" },
+    { 0x001E, "Binding" },
+    { 0x001F, "AccessControl" },
+    { 0x0025, "Actions" },
+    { 0x0028, "BasicInformation" },
+    { 0x0029, "OtaSoftwareUpdateProvider" },
+    { 0x002A, "OtaSoftwareUpdateRequestor" },
+    { 0x002B, "LocalizationConfiguration" },
+    { 0x002C, "TimeFormatLocalization" },
+    { 0x002D, "UnitLocalization" },
+    { 0x002E, "PowerSourceConfiguration" },
+    { 0x002F, "PowerSource" },
+    { 0x0030, "GeneralCommissioning" },
+    { 0x0031, "NetworkCommissioning" },
+    { 0x0032, "DiagnosticLogs" },
+    { 0x0033, "GeneralDiagnostics" },
+    { 0x0034, "SoftwareDiagnostics" },
+    { 0x0035, "ThreadNetworkDiagnostics" },
+    { 0x0036, "WiFiNetworkDiagnostics" },
+    { 0x0037, "EthernetNetworkDiagnostics" },
+    { 0x0038, "TimeSynchronization" },
+    { 0x0039, "BridgedDeviceBasicInformation" },
+    { 0x003B, "Switch" },
+    { 0x003C, "AdministratorCommissioning" },
+    { 0x003E, "OperationalCredentials" },
+    { 0x003F, "GroupKeyManagement" },
+    { 0x0040, "FixedLabel" },
+    { 0x0041, "UserLabel" },
+    { 0x0045, "BooleanState" },
+    { 0x0046, "IcdManagement" },
+    { 0x0047, "Timer" },
+    { 0x0048, "OvenCavityOperationalState" },
+    { 0x0049, "OvenMode" },
+    { 0x0050, "ModeSelect" },
+    { 0x0051, "LaundryWasherMode" },
+    { 0x0052, "RefrigeratorAndTemperatureControlledCabinetMode" },
+    { 0x0053, "LaundryWasherControls" },
+    { 0x0054, "RvcRunMode" },
+    { 0x0055, "RvcCleanMode" },
+    { 0x0056, "TemperatureControl" },
+    { 0x0057, "RefrigeratorAlarm" },
+    { 0x0059, "DishwasherMode" },
+    { 0x005B, "AirQuality" },
+    { 0x005C, "SmokeCoAlarm" },
+    { 0x005D, "DishwasherAlarm" },
+    { 0x005E, "MicrowaveOvenMode" },
+    { 0x005F, "MicrowaveOvenControl" },
+    { 0x0060, "OperationalState" },
+    { 0x0061, "RvcOperationalState" },
+    { 0x0062, "ScenesManagement" },
+    { 0x0071, "HepaFilterMonitoring" },
+    { 0x0072, "ActivatedCarbonFilterMonitoring" },
+    { 0x0080, "BooleanStateConfiguration" },
+    { 0x0081, "ValveConfigurationAndControl" },
+    { 0x0090, "ElectricalPowerMeasurement" },
+    { 0x0091, "ElectricalEnergyMeasurement" },
+    { 0x0094, "WaterHeaterManagement" },
+    { 0x0096, "DemandResponseLoadControl" },
+    { 0x0097, "Messages" },
+    { 0x0098, "DeviceEnergyManagement" },
+    { 0x0099, "EnergyEvse" },
+    { 0x009B, "EnergyPreference" },
+    { 0x009C, "PowerTopology" },
+    { 0x009D, "EnergyEvseMode" },
+    { 0x009E, "DeviceEnergyManagementMode" },
+    { 0x0101, "DoorLock" },
+    { 0x0102, "WindowCovering" },
+    { 0x0150, "ServiceArea" },
+    { 0x0200, "PumpConfigurationAndControl" },
+    { 0x0201, "Thermostat" },
+    { 0x0202, "FanControl" },
+    { 0x0204, "ThermostatUserInterfaceConfiguration" },
+    { 0x0300, "ColorControl" },
+    { 0x0301, "BallastConfiguration" },
+    { 0x0400, "IlluminanceMeasurement" },
+    { 0x0402, "TemperatureMeasurement" },
+    { 0x0403, "PressureMeasurement" },
+    { 0x0404, "FlowMeasurement" },
+    { 0x0405, "RelativeHumidityMeasurement" },
+    { 0x0406, "OccupancySensing" },
+    { 0x040C, "CarbonMonoxideConcentrationMeasurement" },
+    { 0x040D, "CarbonDioxideConcentrationMeasurement" },
+    { 0x0413, "NitrogenDioxideConcentrationMeasurement" },
+    { 0x0415, "OzoneConcentrationMeasurement" },
+    { 0x042A, "PM2.5ConcentrationMeasurement" },
+    { 0x042B, "FormaldehydeConcentrationMeasurement" },
+    { 0x042C, "PM1ConcentrationMeasurement" },
+    { 0x042D, "PM10ConcentrationMeasurement" },
+    { 0x042E, "TotalVolatileOrganicCompoundsConcentrationMeasurement" },
+    { 0x042F, "RadonConcentrationMeasurement" },
+    { 0x0503, "WakeOnLan" },
+    { 0x0504, "Channel" },
+    { 0x0505, "TargetNavigator" },
+    { 0x0506, "MediaPlayback" },
+    { 0x0507, "MediaInput" },
+    { 0x0508, "LowPower" },
+    { 0x0509, "KeypadInput" },
+    { 0x050A, "ContentLauncher" },
+    { 0x050B, "AudioOutput" },
+    { 0x050C, "ApplicationLauncher" },
+    { 0x050D, "ApplicationBasic" },
+    { 0x050E, "AccountLogin" },
+    { 0x050F, "ContentControl" },
+    { 0x0510, "ContentAppObserver" },
+    { 0, NULL }
 };
 
 // Appendix 7.2. Tag Control Field
@@ -1113,13 +1229,11 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
         // Section 4.4.1.5
         proto_tree_add_item_ret_uint(matter_tree, hf_message_counter, tvb, offset, 4, ENC_LITTLE_ENDIAN, &message_counter);
-        col_append_fstr(pinfo->cinfo, COL_INFO, ": Counter=%u", message_counter);
         offset += 4;
 
         // Section 4.4.1.6
         if (message_flags & MESSAGE_FLAG_HAS_SOURCE) {
             proto_tree_add_item_ret_uint64(matter_tree, hf_message_src_id, tvb, offset, 8, ENC_LITTLE_ENDIAN, &source_node_id);
-            col_append_fstr(pinfo->cinfo, COL_INFO, " Src=0x%016" PRIx64, source_node_id);
             offset += 8;
         }
 
@@ -1127,12 +1241,10 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         if (message_dsiz == MESSAGE_FLAG_HAS_DEST_NODE) {
             uint64_t node_id;
             proto_tree_add_item_ret_uint64(matter_tree, hf_message_dest_node_id, tvb, offset, 8, ENC_LITTLE_ENDIAN, &node_id);
-            col_append_fstr(pinfo->cinfo, COL_INFO, " Dest=0x%016" PRIx64, node_id);
             offset += 8;
         } else if (message_dsiz == MESSAGE_FLAG_HAS_DEST_GROUP) {
             unsigned int group_id;
             proto_tree_add_item_ret_uint(matter_tree, hf_message_dest_group_id, tvb, offset, 2, ENC_LITTLE_ENDIAN, &group_id);
-            col_append_fstr(pinfo->cinfo, COL_INFO, " Group=0x%04x", group_id);
             offset += 2;
         }
 
@@ -1187,7 +1299,6 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             dissect_matter_payload(decrypted_tvb, pinfo, payload_tree);
 
             proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
-            col_append_str(pinfo->cinfo, COL_INFO, " [Decrypted]");
         } else if (num_keys > 0) {
             /* Keys were found but none worked */
             proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [Decryption failed - %u key(s) tried]", payload_length, num_keys);
@@ -1262,16 +1373,15 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
     }
     const char *protocol_name = val_to_str_const(protocol_id, protocol_id_vals, "Unknown");
     if (opcode_name) {
-        col_append_fstr(pinfo->cinfo, COL_INFO, " %s: %s", protocol_name, opcode_name);
+        col_set_str(pinfo->cinfo, COL_INFO, opcode_name);
     } else {
-        col_append_fstr(pinfo->cinfo, COL_INFO, " %s: Opcode=0x%02x", protocol_name, protocol_opcode);
+        col_add_fstr(pinfo->cinfo, COL_INFO, "%s: Opcode 0x%02x", protocol_name, protocol_opcode);
     }
 
     // Section 4.4.3.6
     if (exchange_flags & EXCHANGE_FLAG_ACK_MSG) {
         unsigned int ack_counter;
         proto_tree_add_item_ret_uint(pl_tree, hf_payload_ack_counter, tvb, offset, 4, ENC_LITTLE_ENDIAN, &ack_counter);
-        col_append_fstr(pinfo->cinfo, COL_INFO, " AckCounter=%u", ack_counter);
         offset += 4;
     }
 
@@ -1346,6 +1456,7 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
          * context (correct for array elements); for context-specific
          * tags it is looked up from the IM tag-info tables. */
         matter_tlv_context_id_t child_ctx = MATTER_TLV_CONTEXT_NONE;
+        bool is_cluster_tag = false;
 
         switch (control_tag_format)
         {
@@ -1359,8 +1470,14 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
             offset += 1;
             if (ctx != MATTER_TLV_CONTEXT_NONE) {
                 const char *tag_name = matter_tlv_tag_name(ctx, tag_val, &child_ctx);
-                if (tag_name)
-                    proto_item_append_text(ti_element, " (%s)", tag_name);
+                if (tag_name) {
+                    if (strcmp(tag_name, "Cluster") == 0) {
+                        is_cluster_tag = true;
+                        /* Defer annotation — value handler will show (Cluster: Name) */
+                    } else {
+                        proto_item_append_text(ti_element, " (%s)", tag_name);
+                    }
+                }
             }
             break;
         }
@@ -1420,7 +1537,24 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
             // Integer type (signed or unsigned) is encoded in the 3rd bit of the control element.
             int hf = (control_element & 0x04) ? hf_matter_tlv_elem_value_uint : hf_matter_tlv_elem_value_int;
             int size = elem_sizes[control_element & 0x03];
-            proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
+            if (is_cluster_tag && (control_element & 0x04) && size <= 4) {
+                uint32_t cluster_val = (size == 1) ? tvb_get_uint8(tvb, offset)
+                                     : (size == 2) ? tvb_get_letohs(tvb, offset)
+                                     :               tvb_get_letohl(tvb, offset);
+                proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
+                const char *cluster_name = try_val_to_str(cluster_val, matter_cluster_id_vals);
+                if (cluster_name) {
+                    proto_item_append_text(ti_element, " (Cluster: %s)", cluster_name);
+                    if (!p_get_proto_data(pinfo->pool, pinfo, proto_matter, 0)) {
+                        col_append_fstr(pinfo->cinfo, COL_INFO, " (%s)", cluster_name);
+                        p_add_proto_data(pinfo->pool, pinfo, proto_matter, 0, GUINT_TO_POINTER(1));
+                    }
+                } else {
+                    proto_item_append_text(ti_element, " (Cluster)");
+                }
+            } else {
+                proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
+            }
             offset += size;
             break;
         }
