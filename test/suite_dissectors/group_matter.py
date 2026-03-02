@@ -424,6 +424,28 @@ class TestMatterProtocol:
             pkt, ['_ws.col.info'])
         assert 'Secure Channel: Opcode=0xff' in result['_ws.col.info']
 
+    def test_info_column_shows_cluster_name(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Info column appends cluster name when TLV contains a Cluster field."""
+        # ReadRequest (proto=0x0001, opcode=0x02) with TLV:
+        # Structure { tag0: Array [ Structure { tag3: uint8(6) } ] }
+        # Tag 3 in ATTRIBUTE_PATH context = "Cluster", value 6 = On/Off
+        tlv = bytes.fromhex('15 36 00 15 24 03 06 18 18 18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x02, tlv_bytes=tlv)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['_ws.col.info'])
+        assert result['_ws.col.info'].endswith('Interaction Model: ReadRequest (On/Off)')
+
+    def test_cluster_name_matter_1_6(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Clusters added in Matter 1.6 are resolved (Ambient Context Sensing, 0x0431)."""
+        # Structure { tag0: Array [ Structure { tag3: uint16(0x0431) } ] }
+        tlv = bytes.fromhex('15 36 00 15 25 03 31 04 18 18 18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x02, tlv_bytes=tlv)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['_ws.col.info'])
+        assert result['_ws.col.info'].endswith('Interaction Model: ReadRequest (Ambient Context Sensing)')
+
     def test_protocol_id_value_string(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Protocol ID field uses value_string for name resolution."""
         pkt = _make_matter_packet(proto_id=0x0001, opcode=0x05)

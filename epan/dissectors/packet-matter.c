@@ -26,9 +26,11 @@
 #include <epan/expert.h>
 #include <epan/packet.h>
 #include <epan/prefs.h>
+#include <epan/proto_data.h>
 #include <epan/uat.h>
 #include <wsutil/array.h>
 #include <wsutil/wsgcrypt.h>
+#include "packet-matter-clusters.h"
 
 /* Prototypes */
 /* (Required to prevent [-Wmissing-prototypes] warnings */
@@ -487,6 +489,7 @@ static const value_string *opcode_vals_by_protocol[] = {
     bdx_opcode_vals,  // 0x0002: BDX
     udc_opcode_vals,  // 0x0003: User Directed Commissioning
 };
+
 
 // Appendix 7.2. Tag Control Field
 static const value_string matter_tlv_tag_format_vals[] = {
@@ -1344,6 +1347,7 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
          * context (correct for array elements); for context-specific
          * tags it is looked up from the IM tag-info tables. */
         matter_tlv_context_id_t child_ctx = MATTER_TLV_CONTEXT_NONE;
+        bool is_cluster_tag = false;
 
         switch (control_tag_format)
         {
@@ -1357,8 +1361,14 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             offset += 1;
             if (ctx != MATTER_TLV_CONTEXT_NONE) {
                 const char *tag_name = matter_tlv_tag_name(ctx, tag_val, &child_ctx);
-                if (tag_name)
-                    proto_item_append_text(ti_element, " (%s)", tag_name);
+                if (tag_name) {
+                    if (strcmp(tag_name, "Cluster") == 0) {
+                        is_cluster_tag = true;
+                        /* Defer annotation — value handler will show (Cluster: Name) */
+                    } else {
+                        proto_item_append_text(ti_element, " (%s)", tag_name);
+                    }
+                }
             }
             break;
         }
@@ -1418,7 +1428,24 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             // Integer type (signed or unsigned) is encoded in the 3rd bit of the control element.
             int hf = (control_element & 0x04) ? hf_matter_tlv_elem_value_uint : hf_matter_tlv_elem_value_int;
             int size = elem_sizes[control_element & 0x03];
-            proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
+            if (is_cluster_tag && (control_element & 0x04) && size <= 4) {
+                uint32_t cluster_val = (size == 1) ? tvb_get_uint8(tvb, offset)
+                                     : (size == 2) ? tvb_get_letohs(tvb, offset)
+                                     :               tvb_get_letohl(tvb, offset);
+                proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
+                const char *cluster_name = try_val_to_str(cluster_val, matter_cluster_id_vals);
+                if (cluster_name) {
+                    proto_item_append_text(ti_element, " (Cluster: %s)", cluster_name);
+                    if (!p_get_proto_data(pinfo->pool, pinfo, proto_matter, 0)) {
+                        col_append_fstr(pinfo->cinfo, COL_INFO, " (%s)", cluster_name);
+                        p_add_proto_data(pinfo->pool, pinfo, proto_matter, 0, GUINT_TO_POINTER(1));
+                    }
+                } else {
+                    proto_item_append_text(ti_element, " (Cluster)");
+                }
+            } else {
+                proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
+            }
             offset += size;
             break;
         }
