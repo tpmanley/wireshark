@@ -32,6 +32,9 @@
 void proto_reg_handoff_matter(void);
 void proto_register_matter(void);
 
+static int  dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
+static int  dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
+
 /* Initialize the protocol and registered fields */
 static dissector_handle_t matter_handle;
 
@@ -99,7 +102,8 @@ static int ett_matter_tlv_control;
 
 static expert_field ei_matter_tlv_unsupported_control;
 
-static int dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
+// Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
+#define MATTER_DEFAULT_PORT 5540
 
 /* message flags + session ID + security flags + counter */
 #define MATTER_MIN_LENGTH 8
@@ -270,6 +274,101 @@ static const value_string matter_tlv_elem_type_vals[] = {
 
 static int
 dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo, proto_tree *pl_tree);
+
+/*
+ * Heuristic dissector for Matter over UDP.
+ *
+ * Validates the message header and the beginning of the protocol
+ * exchange header to decide whether a UDP payload is likely a Matter
+ * message.  The checks are intentionally strict to avoid false
+ * positives with other UDP protocols (e.g. DNS):
+ *   - Minimum 8-byte message header
+ *   - Version field (bits 4-7 of message flags) must be 0
+ *   - Reserved bit 3 of message flags must be 0
+ *   - Session type (bits 0-1 of security flags) must be 0 or 1
+ *   - Reserved bits 2-4 of security flags must be 0
+ *   - Expected minimum length based on DSIZ
+ *   - For unsecured sessions: the exchange header contains a known
+ *     protocol ID (Secure Channel, Interaction Model, BDX, or UDC)
+ */
+static bool
+dissect_matter_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
+{
+    /* Need at least the fixed header: message_flags(1) + session_id(2) +
+     * security_flags(1) + message_counter(4) = 8 bytes */
+    if (tvb_captured_length(tvb) < MATTER_MIN_LENGTH)
+        return false;
+
+    uint8_t message_flags = tvb_get_uint8(tvb, 0);
+
+    /* Version must be 0 (bits 4-7) */
+    uint8_t version = (message_flags >> 4) & 0x0F;
+    if (version != 0)
+        return false;
+
+    /* Bit 3 of message flags is reserved and must be 0 */
+    if (message_flags & 0x08)
+        return false;
+
+    /* DSIZ (bits 0-1): 0=None, 1=16-bit Group, 2=32-bit Node, 3=64-bit Node */
+    uint8_t dsiz = message_flags & 0x03;
+
+    /* Check security flags byte */
+    uint8_t security_flags = tvb_get_uint8(tvb, 3);
+    uint8_t session_type = security_flags & 0x03;
+    /* Session type must be 0 (unicast) or 1 (group) */
+    if (session_type > 1)
+        return false;
+
+    /* Bits 2-4 of security flags are reserved and must be 0 */
+    if (security_flags & 0x1C)
+        return false;
+
+    /* Calculate expected minimum length based on header fields */
+    unsigned min_len = 8; /* fixed header */
+    bool has_source = (message_flags & 0x04) != 0;
+    if (has_source)
+        min_len += 8; /* 64-bit source node ID */
+    static const unsigned dsiz_len[] = { 0, 2, 8, 8 };
+    min_len += dsiz_len[dsiz];
+
+    if (tvb_captured_length(tvb) < min_len)
+        return false;
+
+    /* For unsecured sessions (session_type==0, session_id==0) the payload
+     * is not encrypted so we can peek at the exchange header to validate
+     * the protocol ID.  This greatly reduces false positives.
+     *
+     * For secured sessions the payload is encrypted and cannot be
+     * validated, so we do NOT claim them heuristically — the false-
+     * positive rate would be far too high.  Secured sessions on the
+     * standard port (5540) are handled by the port-based dissector;
+     * for non-standard ports the user can use "Decode As → Matter". */
+    uint16_t session_id = tvb_get_letohs(tvb, 1);
+    bool is_unsecured = (session_type == 0 && session_id == 0);
+
+    if (!is_unsecured)
+        return false;
+
+    /* Exchange header: flags(1) + opcode(1) + exchange_id(2) +
+     * [vendor_id(2)] + protocol_id(2) = at least 6 bytes */
+    unsigned exch_offset = min_len;
+    if (tvb_captured_length(tvb) < exch_offset + 6)
+        return false;
+    uint8_t exch_flags = tvb_get_uint8(tvb, exch_offset);
+    unsigned proto_offset = exch_offset + 4; /* past flags+opcode+exchange_id */
+    if (exch_flags & EXCHANGE_FLAG_HAS_VENDOR_PROTO)
+        proto_offset += 2;
+    if (tvb_captured_length(tvb) < proto_offset + 2)
+        return false;
+    uint16_t proto_id = tvb_get_letohs(tvb, proto_offset);
+    /* Only accept known Matter protocol IDs (0x0000-0x0003) */
+    if (proto_id > 0x0003)
+        return false;
+
+    dissect_matter(tvb, pinfo, tree, data);
+    return true;
+}
 
 static int
 dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
@@ -959,9 +1058,6 @@ proto_register_matter(void)
 void
 proto_reg_handoff_matter(void)
 {
-    /* Register default Matter ports 5540 for automatic dissection */
-    dissector_add_uint("udp.port", 5540, matter_handle);
-
-    /* Allow decode-as for other ports */
-    dissector_add_for_decode_as("udp.port", matter_handle);
+    dissector_add_uint_with_preference("udp.port", MATTER_DEFAULT_PORT, matter_handle);
+    heur_dissector_add("udp", dissect_matter_heur, "Matter over UDP", "matter_udp", proto_matter, HEURISTIC_ENABLE);
 }

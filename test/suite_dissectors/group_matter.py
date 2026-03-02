@@ -453,3 +453,225 @@ class TestMatterProtocol:
         assert 'matter' in protocols
         # "data" protocol would appear if dissect_matter() didn't consume all bytes
         assert ':data' not in protocols
+
+
+# ─── Helpers for heuristic / default-port tests ──────────────────────
+
+
+def _tshark_heur_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
+                        packet_bytes, fields, src_port=1234, dst_port=5678):
+    """Write a raw packet to pcap and extract field values via tshark.
+
+    Unlike _tshark_fields this does NOT use ``-d udp.port==...,matter``,
+    so the dissector is only invoked via port-based registration (5540) or
+    the heuristic dissector.
+    """
+    hex_dump = "000000 " + " ".join(f"{b:02x}" for b in packet_bytes)
+
+    text_file = result_file('matter_heur_test.txt')
+    pcap_file = result_file('matter_heur_test.pcapng')
+
+    with open(text_file, 'w') as f:
+        f.write(hex_dump + "\n")
+
+    subprocess.check_call(
+        (cmd_text2pcap, '-u', f'{src_port},{dst_port}', text_file, pcap_file),
+        env=test_env,
+    )
+
+    args = [cmd_tshark, '-r', pcap_file, '-T', 'fields']
+    for field in fields:
+        args.extend(['-e', field])
+
+    result = subprocess.run(
+        args, capture_output=True, check=True, encoding='utf-8', env=test_env,
+    )
+
+    values = result.stdout.strip().split('\t')
+    if len(values) == 1 and values[0] == '':
+        values = [''] * len(fields)
+    return dict(zip(fields, values))
+
+
+def _heur_is_matter(cmd_tshark, cmd_text2pcap, test_env, result_file,
+                    packet_bytes, src_port=1234, dst_port=5678):
+    """Return True if tshark recognises *packet_bytes* as Matter.
+
+    Uses a non-standard port pair and no decode-as override so that
+    recognition depends entirely on the heuristic (or default port).
+    """
+    result = _tshark_heur_fields(
+        cmd_tshark, cmd_text2pcap, test_env, result_file,
+        packet_bytes, ['frame.protocols'], src_port=src_port, dst_port=dst_port)
+    return 'matter' in result.get('frame.protocols', '')
+
+
+class TestMatterHeuristic:
+    """Tests for default port registration and heuristic UDP dissector (MR3)."""
+
+    # ── Default port 5540 ─────────────────────────────────────────────
+
+    def test_default_port_5540(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Traffic to port 5540 is auto-dissected as Matter without decode-as."""
+        pkt = _make_matter_packet()
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, dst_port=5540)
+
+    def test_default_port_5540_fields(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Fields are properly decoded on the default port."""
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x01)
+        result = _tshark_heur_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['matter.payload.protocol_id'], dst_port=5540)
+        assert result['matter.payload.protocol_id'] == '0x0001'
+
+    # ── Heuristic: positive matches ───────────────────────────────────
+
+    def test_heur_unsecured_proto_secure_channel(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Heuristic matches unsecured session with Secure Channel protocol (0x0000)."""
+        pkt = _make_matter_packet(proto_id=0x0000)
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_unsecured_proto_im(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Heuristic matches unsecured session with Interaction Model protocol (0x0001)."""
+        pkt = _make_matter_packet(proto_id=0x0001)
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_unsecured_proto_bdx(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Heuristic matches unsecured session with BDX protocol (0x0002)."""
+        pkt = _make_matter_packet(proto_id=0x0002)
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_unsecured_proto_udc(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Heuristic matches unsecured session with UDC protocol (0x0003)."""
+        pkt = _make_matter_packet(proto_id=0x0003)
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_with_source_node_id(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Heuristic matches when source node ID is present (has_source flag)."""
+        # message_flags bit 2 = has_source, adds 8 bytes for source node ID
+        header = bytes([
+            0x04,                       # message flags: has_source=1, dsiz=0
+            0x00, 0x00,                 # session ID (unsecured)
+            0x00,                       # security flags
+            0x01, 0x00, 0x00, 0x00,    # message counter
+            0x01, 0x02, 0x03, 0x04,    # source node ID (8 bytes)
+            0x05, 0x06, 0x07, 0x08,
+        ])
+        exchange = bytes([
+            0x05,                       # exchange flags (initiator + reliable)
+            0x01,                       # opcode
+            0x00, 0x00,                 # exchange ID
+        ]) + struct.pack('<H', 0x0000)  # protocol ID: Secure Channel
+        pkt = header + exchange
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_with_dsiz_group(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Heuristic matches with DSIZ=1 (16-bit group destination)."""
+        header = bytes([
+            0x01,                       # message flags: dsiz=1 (group)
+            0x00, 0x00,                 # session ID (unsecured)
+            0x00,                       # security flags
+            0x01, 0x00, 0x00, 0x00,    # message counter
+            0x00, 0x01,                 # 16-bit group ID
+        ])
+        exchange = bytes([
+            0x05, 0x01, 0x00, 0x00,
+        ]) + struct.pack('<H', 0x0001)
+        pkt = header + exchange
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_with_dsiz_node64(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Heuristic matches with DSIZ=3 (64-bit node destination)."""
+        header = bytes([
+            0x03,                       # message flags: dsiz=3 (64-bit node)
+            0x00, 0x00,                 # session ID (unsecured)
+            0x00,                       # security flags
+            0x01, 0x00, 0x00, 0x00,    # message counter
+        ]) + bytes(8)                   # 64-bit destination node ID
+        exchange = bytes([
+            0x05, 0x01, 0x00, 0x00,
+        ]) + struct.pack('<H', 0x0000)
+        pkt = header + exchange
+        assert _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    # ── Heuristic: rejection cases ────────────────────────────────────
+
+    def test_heur_rejects_too_short(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Packets shorter than 8 bytes are not claimed."""
+        pkt = bytes(7)  # too short
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_rejects_bad_version(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Non-zero version field (bits 4-7) causes rejection."""
+        pkt = bytearray(_make_matter_packet())
+        pkt[0] = 0x10  # version=1 in bits 4-7
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, bytes(pkt))
+
+    def test_heur_rejects_reserved_msg_flag(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Reserved bit 3 of message flags causes rejection."""
+        pkt = bytearray(_make_matter_packet())
+        pkt[0] = 0x08  # reserved bit 3
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, bytes(pkt))
+
+    def test_heur_rejects_bad_session_type(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Session type > 1 causes rejection."""
+        pkt = bytearray(_make_matter_packet())
+        pkt[3] = 0x02  # session_type = 2 (invalid)
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, bytes(pkt))
+
+    def test_heur_rejects_reserved_security_bits(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Reserved bits 2-4 of security flags cause rejection."""
+        pkt = bytearray(_make_matter_packet())
+        pkt[3] = 0x04  # bit 2 set (reserved)
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, bytes(pkt))
+
+    def test_heur_rejects_secured_session(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Secured sessions (non-zero session_id) are not claimed heuristically."""
+        pkt = bytearray(_make_matter_packet())
+        pkt[1] = 0x01  # session_id = 1 (non-zero → secured)
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, bytes(pkt))
+
+    def test_heur_rejects_unknown_proto_id(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Protocol ID > 3 causes rejection."""
+        pkt = _make_matter_packet(proto_id=0x0004)
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_rejects_truncated_exchange(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Packet with valid header but truncated exchange header is rejected."""
+        # Just the 8-byte message header, no exchange header at all
+        pkt = bytes([
+            0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+        ])
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+
+    def test_heur_rejects_dsiz_length_mismatch(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Packet too short for the declared DSIZ is rejected."""
+        # dsiz=3 (64-bit node) requires 8+8=16 bytes minimum header,
+        # but we only provide 10 bytes
+        pkt = bytes([
+            0x03,                       # dsiz=3
+            0x00, 0x00,                 # session ID
+            0x00,                       # security flags
+            0x01, 0x00, 0x00, 0x00,    # counter
+            0x00, 0x00,                 # only 2 bytes of dest (need 8)
+        ])
+        assert not _heur_is_matter(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
