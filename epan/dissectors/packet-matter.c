@@ -17,9 +17,8 @@
  * The specification can be freely requested at:
  * https://csa-iot.org/developer-resource/specifications-download-request/
  *
- * Comments below reference section numbers of the Matter Core Specification R1.0 (22-27349-001).
- *
- * Matter-TLV dissector is based on Matter Specification Version 1.3.
+ * Comments below reference section numbers of the Matter Core
+ * Specification Version 1.5.
  */
 
 #include <config.h>
@@ -52,6 +51,8 @@ static int hf_message_src_id;
 static int hf_message_dest_node_id;
 static int hf_message_dest_group_id;
 static int hf_message_privacy_header;
+static int hf_message_ext_length;
+static int hf_message_ext_data;
 
 static int hf_payload;
 static int hf_payload_mic;
@@ -75,9 +76,16 @@ static int hf_matter_tlv_elem_control;
 static int hf_matter_tlv_elem_control_tag_format;
 static int hf_matter_tlv_elem_control_element_type;
 static int hf_matter_tlv_elem_tag;
+static int hf_matter_tlv_elem_tag_vendor_id;
+static int hf_matter_tlv_elem_tag_profile;
+static int hf_matter_tlv_elem_tag_number_16;
+static int hf_matter_tlv_elem_tag_number_32;
 static int hf_matter_tlv_elem_length;
 static int hf_matter_tlv_elem_value_int;
 static int hf_matter_tlv_elem_value_uint;
+static int hf_matter_tlv_elem_value_float;
+static int hf_matter_tlv_elem_value_double;
+static int hf_matter_tlv_elem_value_string;
 static int hf_matter_tlv_elem_value_bytes;
 
 static int ett_matter;
@@ -90,6 +98,8 @@ static int ett_matter_tlv;
 static int ett_matter_tlv_control;
 
 static expert_field ei_matter_tlv_unsupported_control;
+
+static int dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
 
 /* message flags + session ID + security flags + counter */
 #define MATTER_MIN_LENGTH 8
@@ -123,6 +133,7 @@ static const value_string dsiz_vals[] = {
     { 0, "Not present" },
     { MESSAGE_FLAG_HAS_DEST_NODE,  "64-bit Node ID" },
     { MESSAGE_FLAG_HAS_DEST_GROUP, "16-bit Group ID" },
+    { 3, "64-bit Node ID (Reserved)" },
     { 0, NULL }
 };
 
@@ -130,6 +141,77 @@ static const value_string session_type_vals[] = {
     { 0, "Unicast Session" },
     { 1, "Group Session" },
     { 0, NULL }
+};
+
+// Section 4.4.3.4: Protocol IDs
+static const value_string protocol_id_vals[] = {
+    { 0x0000, "Secure Channel" },
+    { 0x0001, "Interaction Model" },
+    { 0x0002, "BDX (Bulk Data Exchange)" },
+    { 0x0003, "User Directed Commissioning" },
+    { 0, NULL }
+};
+
+// Section 4.13.1: Secure Channel Protocol Opcodes
+static const value_string sc_opcode_vals[] = {
+    { 0x10, "MsgCounterSyncReq" },
+    { 0x11, "MsgCounterSyncRsp" },
+    { 0x20, "MRP Standalone Acknowledgement" },
+    { 0x30, "PBKDFParamRequest" },
+    { 0x31, "PBKDFParamResponse" },
+    { 0x32, "PASE Pake1" },
+    { 0x33, "PASE Pake2" },
+    { 0x34, "PASE Pake3" },
+    { 0x40, "StatusReport" },
+    { 0x50, "ICD CheckIn" },
+    { 0x60, "CASE Sigma1" },
+    { 0x61, "CASE Sigma2" },
+    { 0x62, "CASE Sigma3" },
+    { 0x63, "CASE Sigma2Resume" },
+    { 0, NULL }
+};
+
+// Section 8.2.3: Interaction Model Protocol Opcodes
+static const value_string im_opcode_vals[] = {
+    { 0x01, "StatusResponse" },
+    { 0x02, "ReadRequest" },
+    { 0x03, "SubscribeRequest" },
+    { 0x04, "SubscribeResponse" },
+    { 0x05, "ReportData" },
+    { 0x06, "WriteRequest" },
+    { 0x07, "WriteResponse" },
+    { 0x08, "InvokeRequest" },
+    { 0x09, "InvokeResponse" },
+    { 0x0A, "TimedRequest" },
+    { 0, NULL }
+};
+
+// Section 11.22.5: BDX Protocol Opcodes
+static const value_string bdx_opcode_vals[] = {
+    { 0x01, "SendInit" },
+    { 0x02, "SendAccept" },
+    { 0x04, "ReceiveInit" },
+    { 0x05, "ReceiveAccept" },
+    { 0x10, "BlockQuery" },
+    { 0x11, "Block" },
+    { 0x12, "BlockEOF" },
+    { 0x13, "BlockAck" },
+    { 0x14, "BlockAckEOF" },
+    { 0x15, "BlockQueryWithSkip" },
+    { 0, NULL }
+};
+
+// Section 5.3: User Directed Commissioning Protocol Opcodes
+static const value_string udc_opcode_vals[] = {
+    { 0x00, "IdentificationDeclaration" },
+    { 0, NULL }
+};
+
+static const value_string *opcode_vals_by_protocol[] = {
+    sc_opcode_vals,   // 0x0000: Secure Channel
+    im_opcode_vals,   // 0x0001: Interaction Model
+    bdx_opcode_vals,  // 0x0002: BDX
+    udc_opcode_vals,  // 0x0003: User Directed Commissioning
 };
 
 // Appendix 7.2. Tag Control Field
@@ -302,6 +384,17 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             offset += 2;
         }
 
+        // Section 4.4.1.8: Message Extensions
+        if (security_flags & SECURITY_FLAG_HAS_EXTENSIONS) {
+            uint32_t ext_len = 0;
+            proto_tree_add_item_ret_uint(matter_tree, hf_message_ext_length, tvb, offset, 2, ENC_LITTLE_ENDIAN, &ext_len);
+            offset += 2;
+            if (ext_len > 0) {
+                proto_tree_add_item(matter_tree, hf_message_ext_data, tvb, offset, ext_len, ENC_NA);
+                offset += ext_len;
+            }
+        }
+
     }
 
     if (is_unsecured_session) {
@@ -317,7 +410,7 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, CRYPTO_AEAD_MIC_LENGTH, ENC_NA);
     }
 
-    return offset;
+    return tvb_captured_length(tvb);
 }
 
 static int
@@ -341,13 +434,15 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
     offset += 1;
 
     // Section 4.4.3.2
-    proto_tree_add_item(pl_tree, hf_payload_protocol_opcode, tvb, offset, 1, ENC_LITTLE_ENDIAN);
+    uint32_t protocol_opcode = 0;
+    proto_tree_add_item_ret_uint(pl_tree, hf_payload_protocol_opcode, tvb, offset, 1, ENC_LITTLE_ENDIAN, &protocol_opcode);
     offset += 1;
 
     // Section 4.4.3.3
     proto_tree_add_item(pl_tree, hf_payload_exchange_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
     offset += 2;
 
+    uint32_t protocol_vendor_id = 0;
     if (exchange_flags & EXCHANGE_FLAG_HAS_VENDOR_PROTO) {
         // NOTE: The Matter specification R1.0 (22-27349) section 4.4 says
         // the Vendor ID comes after the Protocol ID. However, the SDK
@@ -357,13 +452,26 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         // in a future version:
         // https://github.com/project-chip/connectedhomeip/issues/25003
         // So we parse Vendor ID first, contrary to the current spec.
-        proto_tree_add_item(pl_tree, hf_payload_protocol_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item_ret_uint(pl_tree, hf_payload_protocol_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN, &protocol_vendor_id);
         offset += 2;
     }
 
     // Section 4.4.3.4
-    proto_tree_add_item(pl_tree, hf_payload_protocol_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+    uint32_t protocol_id = 0;
+    proto_tree_add_item_ret_uint(pl_tree, hf_payload_protocol_id, tvb, offset, 2, ENC_LITTLE_ENDIAN, &protocol_id);
     offset += 2;
+
+    // Look up protocol-specific opcode name for display
+    const char *opcode_name = NULL;
+    if (protocol_vendor_id == 0 && protocol_id < array_length(opcode_vals_by_protocol)) {
+        opcode_name = try_val_to_str(protocol_opcode, opcode_vals_by_protocol[protocol_id]);
+    }
+    const char *protocol_name = val_to_str_const(protocol_id, protocol_id_vals, "Unknown");
+    if (opcode_name) {
+        col_append_fstr(pinfo->cinfo, COL_INFO, " %s: %s", protocol_name, opcode_name);
+    } else {
+        col_append_fstr(pinfo->cinfo, COL_INFO, " %s: Opcode=0x%02x", protocol_name, protocol_opcode);
+    }
 
     // Section 4.4.3.6
     if (exchange_flags & EXCHANGE_FLAG_ACK_MSG) {
@@ -382,7 +490,12 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         offset += secured_ext_len;
     }
     uint32_t application_length = tvb_reported_length_remaining(tvb, offset);
-    proto_tree_add_bytes_format(pl_tree, hf_payload_application, tvb, offset, application_length, NULL, "Application payload (%u bytes)", application_length);
+    if (application_length > 0) {
+        proto_item *app_item = proto_tree_add_bytes_format(pl_tree, hf_payload_application, tvb, offset, application_length, NULL, "Application payload (%u bytes)", application_length);
+        proto_tree *app_tree = proto_item_add_subtree(app_item, ett_payload);
+        tvbuff_t *app_tvb = tvb_new_subset_length(tvb, offset, application_length);
+        dissect_matter_tlv(app_tvb, pinfo, app_tree, NULL);
+    }
     offset += application_length;
     return offset;
 }
@@ -440,6 +553,38 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
             proto_tree_add_item(tree_element, matter_tlv_elem_tag, tvb, offset, 1, ENC_NA);
             offset += 1;
             break;
+        case 2: // Common Profile Tag Form, 2-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_16, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            break;
+        case 3: // Common Profile Tag Form, 4-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_32, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+            offset += 4;
+            break;
+        case 4: // Implicit Profile Tag Form, 2-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_16, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            break;
+        case 5: // Implicit Profile Tag Form, 4-octet tag number
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_32, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+            offset += 4;
+            break;
+        case 6: // Fully-qualified Tag Form, 6 octets (vendor 2 + profile 2 + tag 2)
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_profile, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_16, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            break;
+        case 7: // Fully-qualified Tag Form, 8 octets (vendor 2 + profile 2 + tag 4)
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_vendor_id, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_profile, tvb, offset, 2, ENC_LITTLE_ENDIAN);
+            offset += 2;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_tag_number_32, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+            offset += 4;
+            break;
         default:
             goto unsupported_control;
         }
@@ -471,6 +616,26 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
         case 0x08: // Boolean False
         case 0x09: // Boolean True
             break;
+        case 0x0A: // Floating Point Number, 4-octet value (float)
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_value_float, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+            offset += 4;
+            break;
+        case 0x0B: // Floating Point Number, 8-octet value (double)
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_value_double, tvb, offset, 8, ENC_LITTLE_ENDIAN);
+            offset += 8;
+            break;
+        case 0x0C: // UTF-8 String (1-octet length)
+        case 0x0D: // UTF-8 String (2-octet length)
+        case 0x0E: // UTF-8 String (4-octet length)
+        case 0x0F: // UTF-8 String (8-octet length)
+        {
+            int size = elem_sizes[control_element & 0x03];
+            proto_tree_add_item_ret_uint64(tree_element, hf_matter_tlv_elem_length, tvb, offset, size, ENC_LITTLE_ENDIAN, &str_length);
+            offset += size;
+            proto_tree_add_item(tree_element, hf_matter_tlv_elem_value_string, tvb, offset, (int)str_length, ENC_UTF_8);
+            offset += (int)str_length;
+            break;
+        }
         case 0x10: // Octet String (1-octet length)
         case 0x11: // Octet String (2-octet length)
         case 0x12: // Octet String (4-octet length)
@@ -488,7 +653,9 @@ dissect_matter_tlv(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
         case 0x15: // Structure
         case 0x16: // Array
         case 0x17: // List
+            increment_dissection_depth(pinfo);
             offset += dissect_matter_tlv(tvb_new_subset_remaining(tvb, offset), pinfo, tree_element, data);
+            decrement_dissection_depth(pinfo);
             break;
         default:
             goto unsupported_control;
@@ -585,6 +752,16 @@ proto_register_matter(void)
             FT_BYTES, BASE_NONE, NULL, 0,
             "Headers encrypted with message privacy", HFILL }
         },
+        { &hf_message_ext_length,
+          { "Message Extensions Length", "matter.message.ext_length",
+            FT_UINT16, BASE_DEC, NULL, 0,
+            "Length of message extensions data, in bytes", HFILL }
+        },
+        { &hf_message_ext_data,
+          { "Message Extensions Data", "matter.message.ext_data",
+            FT_BYTES, BASE_NONE, NULL, 0,
+            "Message extensions payload", HFILL }
+        },
         { &hf_payload,
           { "Payload", "matter.payload",
             FT_NONE, BASE_NONE, NULL, 0,
@@ -642,7 +819,7 @@ proto_register_matter(void)
         },
         { &hf_payload_protocol_id,
           { "Protocol ID", "matter.payload.protocol_id",
-            FT_UINT16, BASE_HEX, NULL, 0,
+            FT_UINT16, BASE_HEX, VALS(protocol_id_vals), 0,
             "The protocol in which the Protocol Opcode of the message is defined", HFILL }
         },
         { &hf_payload_ack_counter,
@@ -688,7 +865,27 @@ proto_register_matter(void)
         { &hf_matter_tlv_elem_tag,
           { "Tag", "matter.tlv.tag",
             FT_UINT32, BASE_HEX, NULL, 0x0,
-            NULL, HFILL }
+            "Context-specific tag number", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_vendor_id,
+          { "Tag Vendor ID", "matter.tlv.tag_vendor",
+            FT_UINT16, BASE_HEX, NULL, 0x0,
+            "Vendor ID portion of a fully-qualified tag", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_profile,
+          { "Tag Profile Number", "matter.tlv.tag_profile",
+            FT_UINT16, BASE_HEX, NULL, 0x0,
+            "Profile number portion of a fully-qualified tag", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_number_16,
+          { "Tag Number", "matter.tlv.tag_number",
+            FT_UINT16, BASE_DEC_HEX, NULL, 0x0,
+            "16-bit tag number", HFILL }
+        },
+        { &hf_matter_tlv_elem_tag_number_32,
+          { "Tag Number", "matter.tlv.tag_number32",
+            FT_UINT32, BASE_DEC_HEX, NULL, 0x0,
+            "32-bit tag number", HFILL }
         },
         { &hf_matter_tlv_elem_length,
           { "Length", "matter.tlv.length",
@@ -703,6 +900,21 @@ proto_register_matter(void)
         { &hf_matter_tlv_elem_value_uint,
           { "Value", "matter.tlv.value_uint",
             FT_UINT64, BASE_DEC, NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_matter_tlv_elem_value_float,
+          { "Value", "matter.tlv.value_float",
+            FT_FLOAT, BASE_NONE, NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_matter_tlv_elem_value_double,
+          { "Value", "matter.tlv.value_double",
+            FT_DOUBLE, BASE_NONE, NULL, 0x0,
+            NULL, HFILL }
+        },
+        { &hf_matter_tlv_elem_value_string,
+          { "Value", "matter.tlv.value_string",
+            FT_STRING, BASE_NONE, NULL, 0x0,
             NULL, HFILL }
         },
         { &hf_matter_tlv_elem_value_bytes,
