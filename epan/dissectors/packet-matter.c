@@ -60,6 +60,8 @@ static int hf_message_src_id;
 static int hf_message_dest_node_id;
 static int hf_message_dest_group_id;
 static int hf_message_privacy_header;
+static int hf_group_addr_fabric_id;
+static int hf_group_addr_group_id;
 static int hf_message_ext_length;
 static int hf_message_ext_data;
 
@@ -727,6 +729,8 @@ static const value_string *opcode_vals_by_protocol[] = {
     bdx_opcode_vals,  // 0x0002: BDX
     udc_opcode_vals,  // 0x0003: User Directed Commissioning
 };
+
+
 
 
 // Appendix 7.2. Tag Control Field
@@ -1478,6 +1482,25 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     else if (message_session_type == SECURITY_FLAG_SESSION_TYPE_GROUP)
         col_add_fstr(pinfo->cinfo, COL_INFO, "Group Session [0x%04x]", session_id);
 
+    /* Section 2.5.4.2: operational group multicast addresses have the form
+     * FF35:0040:FD<fabric-id>:00<group-id>. When the message arrived on such
+     * an address, surface the fabric and group IDs as generated fields. */
+    if (message_session_type == SECURITY_FLAG_SESSION_TYPE_GROUP &&
+        pinfo->dst.type == AT_IPv6 && pinfo->dst.len == 16) {
+        const uint8_t *a = (const uint8_t *)pinfo->dst.data;
+        if (a[0] == 0xFF && a[1] == 0x35 && a[2] == 0x00 && a[3] == 0x40 &&
+            a[4] == 0xFD && a[13] == 0x00) {
+            uint64_t fabric_id = 0;
+            for (unsigned i = 0; i < 8; i++)
+                fabric_id = (fabric_id << 8) | a[5 + i];
+            uint16_t group_id = (uint16_t)((a[14] << 8) | a[15]);
+            proto_item *fi = proto_tree_add_uint64(matter_tree, hf_group_addr_fabric_id, tvb, 0, 0, fabric_id);
+            proto_item_set_generated(fi);
+            proto_item *gi = proto_tree_add_uint(matter_tree, hf_group_addr_group_id, tvb, 0, 0, group_id);
+            proto_item_set_generated(gi);
+        }
+    }
+
     // Section 4.8.3: with the privacy flag set, the counter, source and
     // destination fields are obfuscated. For a group session we can undo
     // this with the derived privacy key and then dissect the header.
@@ -1860,6 +1883,10 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
 
     unsigned length = tvb_reported_length_remaining(tvb, 0);
     unsigned offset = 0;
+    /* Cluster ID seen earlier in this container, so a sibling Attribute or
+     * Command element can be resolved to a name (path IBs list the cluster
+     * before the attribute/command). */
+    uint32_t current_cluster = 0xFFFFFFFF;
 
     while (offset < length) {
 
@@ -1896,6 +1923,8 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         bool is_cluster_tag = false;
         bool is_endpoint_tag = false;
         bool is_attribute_tag = false;
+        bool is_command_tag = false;
+        bool is_status_tag = false;
         /* Tag name whose annotation is deferred until the value is known */
         const char *deferred_tag_name = NULL;
 
@@ -1918,8 +1947,13 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                         is_endpoint_tag = true;
                     } else if (strcmp(tag_name, "Attribute") == 0) {
                         is_attribute_tag = true;
+                    } else if (strcmp(tag_name, "Command") == 0) {
+                        is_command_tag = true;
+                    } else if (strcmp(tag_name, "Status") == 0) {
+                        is_status_tag = true;
                     }
-                    if (is_cluster_tag || is_endpoint_tag || is_attribute_tag)
+                    if (is_cluster_tag || is_endpoint_tag || is_attribute_tag ||
+                        is_command_tag || is_status_tag)
                         deferred_tag_name = tag_name;
                     else
                         proto_item_append_text(ti_element, " (%s)", tag_name);
@@ -1983,13 +2017,15 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
             // Integer type (signed or unsigned) is encoded in the 3rd bit of the control element.
             int hf = (control_element & 0x04) ? hf_matter_tlv_elem_value_uint : hf_matter_tlv_elem_value_int;
             int size = elem_sizes[control_element & 0x03];
-            if ((is_cluster_tag || is_endpoint_tag || is_attribute_tag) &&
+            if ((is_cluster_tag || is_endpoint_tag || is_attribute_tag ||
+                 is_command_tag || is_status_tag) &&
                 (control_element & 0x04) && size <= 4) {
                 uint32_t val = (size == 1) ? tvb_get_uint8(tvb, offset)
                              : (size == 2) ? tvb_get_letohs(tvb, offset)
                              :               tvb_get_letohl(tvb, offset);
                 proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
                 if (is_cluster_tag) {
+                    current_cluster = val;
                     const char *cluster_name = try_val_to_str(val, matter_cluster_id_vals);
                     if (cluster_name) {
                         proto_item_append_text(ti_element, " (Cluster: %s)", cluster_name);
@@ -2003,7 +2039,20 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                 } else if (is_endpoint_tag) {
                     proto_item_append_text(ti_element, " (Endpoint: %u)", val);
                 } else if (is_attribute_tag) {
-                    proto_item_append_text(ti_element, " (Attribute: 0x%04X)", val);
+                    const char *an = matter_cluster_member_name(current_cluster, false, val);
+                    if (an)
+                        proto_item_append_text(ti_element, " (Attribute: %s)", an);
+                    else
+                        proto_item_append_text(ti_element, " (Attribute: 0x%04X)", val);
+                } else if (is_status_tag) {
+                    proto_item_append_text(ti_element, " (Status: %s)",
+                                           val_to_str_const(val, matter_im_status_vals, "Unknown"));
+                } else if (is_command_tag) {
+                    const char *cn = matter_cluster_member_name(current_cluster, true, val);
+                    if (cn)
+                        proto_item_append_text(ti_element, " (Command: %s)", cn);
+                    else
+                        proto_item_append_text(ti_element, " (Command: 0x%02X)", val);
                 }
             } else {
                 proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
@@ -2059,6 +2108,8 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         case 0x15: // Structure
         case 0x16: // Array
         case 0x17: // List
+            if (deferred_tag_name)
+                proto_item_append_text(ti_element, " (%s)", deferred_tag_name);
             increment_dissection_depth(pinfo);
             offset += dissect_matter_tlv_internal(tvb_new_subset_remaining(tvb, offset), pinfo, tree_element, hf_tag, child_ctx);
             decrement_dissection_depth(pinfo);
@@ -2166,6 +2217,16 @@ proto_register_matter(void)
           { "Encrypted header fields", "matter.message.privacy_header",
             FT_BYTES, BASE_NONE, NULL, 0,
             "Headers encrypted with message privacy", HFILL }
+        },
+        { &hf_group_addr_fabric_id,
+          { "Group Address Fabric ID", "matter.group_addr.fabric_id",
+            FT_UINT64, BASE_HEX, NULL, 0,
+            "Fabric ID from the operational group multicast address", HFILL }
+        },
+        { &hf_group_addr_group_id,
+          { "Group Address Group ID", "matter.group_addr.group_id",
+            FT_UINT16, BASE_HEX, NULL, 0,
+            "Group ID from the operational group multicast address", HFILL }
         },
         { &hf_message_ext_length,
           { "Message Extensions Length", "matter.message.ext_length",

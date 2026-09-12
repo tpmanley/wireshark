@@ -104,6 +104,26 @@ def _tshark_fields(cmd_tshark, cmd_text2pcap, test_env, result_file, packet_byte
     return dict(zip(fields, values))
 
 
+def _tshark_tree6(cmd_tshark, cmd_text2pcap, test_env, result_file, packet_bytes,
+                  dst_ip, fields):
+    """Dissect a Matter/UDP/IPv6 packet with a given IPv6 destination; return fields."""
+    text_file = result_file('matter6.txt')
+    pcap_file = result_file('matter6.pcapng')
+    with open(text_file, 'w') as f:
+        f.write("000000 " + " ".join(f"{b:02x}" for b in packet_bytes) + "\n")
+    subprocess.check_call(
+        (cmd_text2pcap, '-6', f'fe80::1,{dst_ip}', '-u', '5540,5540', text_file, pcap_file),
+        env=test_env)
+    args = [cmd_tshark, '-r', pcap_file, '-T', 'fields']
+    for fld in fields:
+        args.extend(['-e', fld])
+    result = subprocess.run(args, capture_output=True, check=True, encoding='utf-8', env=test_env)
+    values = result.stdout.rstrip('\r\n').split('\t')
+    if len(values) == 1 and values[0] == '':
+        values = [''] * len(fields)
+    return dict(zip(fields, values))
+
+
 def _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, packet_bytes):
     """Write a raw packet to pcap and return tshark's verbose (-V) tree output."""
     hex_dump = "000000 " + " ".join(f"{b:02x}" for b in packet_bytes)
@@ -572,6 +592,14 @@ class TestMatterProtocol:
         assert '(iterations)' in tree
         assert '(salt)' in tree
 
+    def test_status_ib_code_annotated(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A StatusResponse status code is resolved to its IM status name."""
+        # StatusResponseMessage { 0: Status = 0x87 (CONSTRAINT_ERROR) }
+        tlv = bytes.fromhex('15 24 00 87 18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x01, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert '(Status: CONSTRAINT_ERROR)' in tree
+
     def test_im_read_request_annotated(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Interaction Model ReadRequest paths are labelled through nested contexts."""
         # Structure { 0: Array [ Structure { 2: uint8 endpoint=1, 3: uint8 cluster=6, 4: uint8 attribute=0 } ], 3: true }
@@ -585,7 +613,7 @@ class TestMatterProtocol:
         assert 'Array (AttributeRequests)' in tree
         assert '(Endpoint: 1)' in tree
         assert '(Cluster: On/Off)' in tree
-        assert '(Attribute: 0x0000)' in tree
+        assert '(Attribute: OnOff)' in tree
         assert 'Boolean True (FabricFiltered)' in tree
 
     def test_secure_channel_msg_counter_sync_not_tlv(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
@@ -1284,6 +1312,45 @@ class TestMatterGroupDecryption:
         assert result['matter.message.privacy_header'] != ''
         assert result['matter.message.counter'] == ''
         assert '[Decrypted]' not in result['_ws.col.Info']
+
+    def test_command_name_annotation(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A Groupcast JoinGroup InvokeRequest is annotated with cluster and command names."""
+        # InvokeRequestMessage { 0:false, 1:false,
+        #   2: InvokeRequests [ CommandDataIB { 0: CommandPath { 0:ep=1, 1:cluster=0x0065, 2:cmd=0 } } ] }
+        tlv = bytes.fromhex(
+            '15'
+            '2800 2801'
+            '3602 15'
+              '3500 24 00 01 25 01 6500 24 02 00 18'
+            '18 18'
+            '24ff01 18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x08, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert '(Cluster: Groupcast)' in tree
+        assert '(Command: JoinGroup)' in tree
+        assert '(Endpoint: 1)' in tree
+
+    def test_attribute_name_annotation(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A Group Key Management attribute path resolves the attribute name."""
+        # ReadRequest { 0: AttributeRequests [ AttributePath { 2:ep=0, 3:cluster=0x003F, 4:attr=1 } ] }
+        tlv = bytes.fromhex(
+            '15'
+            '3600 15 24 02 00 25 03 3f00 24 04 01 18 18'
+            '18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x02, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert '(Cluster: Group Key Management)' in tree
+        assert '(Attribute: GroupTable)' in tree
+
+    def test_group_multicast_address(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A group message on an operational multicast address exposes fabric and group IDs."""
+        # FF35:0040:FD<fabric 2906c908d115d362>:00<group 0002>
+        dst = 'ff35:40:fd29:6c9:8d1:15d3:6200:2'
+        result = _tshark_tree6(
+            cmd_tshark, cmd_text2pcap, test_env, result_file, _ENC_PKT_GROUP, dst,
+            ['matter.group_addr.fabric_id', 'matter.group_addr.group_id'])
+        assert result['matter.group_addr.fabric_id'] == '0x2906c908d115d362'
+        assert result['matter.group_addr.group_id'] == '0x0002'
 
     def test_group_wrong_fabric(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """A key deriving to a different session ID is not even tried (no failure noise)."""
