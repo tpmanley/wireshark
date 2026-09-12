@@ -188,6 +188,16 @@ The following features are either new or have been significantly updated since v
   1803 and later, including Windows Server 2019 and later, all support Unix domain
   sockets.)
 
+* The Matter dissector can now decrypt CASE and PASE secured sessions using
+  AES-128-CCM session keys entered in the new menu:Edit[Preferences,Protocols,Matter]
+  session keys table, and it fully dissects Matter TLV payloads, including all
+  tag forms, floating point and UTF-8 string elements. Interaction Model
+  messages and the PASE/CASE session establishment messages are annotated with
+  their field names from the Matter 1.6.1 specification, cluster IDs are
+  resolved to names, and Secure Channel StatusReport messages are dissected. A
+  heuristic dissector recognizes unsecured Matter messages on non-standard
+  UDP ports.
+
 === Removed Features and Support
 
 Dumpcap's TCP@host:port interface has been removed. Tools like `socat`, `ncat`,
