@@ -645,9 +645,66 @@ class TestMatterProtocol:
         pkt = _make_matter_packet(proto_id=0x0000, opcode=0x40, tlv_bytes=status_report)
         result = _tshark_fields(
             cmd_tshark, cmd_text2pcap, test_env, result_file,
-            pkt, ['matter.tlv', 'matter.payload.application'])
+            pkt, ['matter.tlv', 'matter.sc.status.general_code'])
         assert result['matter.tlv'] == ''
-        assert result['matter.payload.application'] == '00' * 8
+        assert result['matter.sc.status.general_code'] == '0'
+
+    def test_status_report_session_established(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """StatusReport fields and names for a successful session establishment."""
+        status_report = struct.pack('<HIH', 0, 0x00000000, 0x0000)
+        pkt = _make_matter_packet(proto_id=0x0000, opcode=0x40, tlv_bytes=status_report)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['matter.sc.status.general_code', 'matter.sc.status.protocol_id',
+                  'matter.sc.status.protocol_code', '_ws.col.info'])
+        assert result['matter.sc.status.general_code'] == '0'
+        assert result['matter.sc.status.protocol_id'] == '0x0000'
+        assert result['matter.sc.status.protocol_code'] == '0x0000'
+        assert result['_ws.col.info'].endswith(
+            'Secure Channel: StatusReport (SUCCESS, SESSION_ESTABLISHMENT_SUCCESS)')
+
+    def test_status_report_busy_with_data(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """StatusReport BUSY carries a minimum wait time as protocol data."""
+        status_report = struct.pack('<HIH', 8, 0x00000000, 0x0004) + struct.pack('<H', 500)
+        pkt = _make_matter_packet(proto_id=0x0000, opcode=0x40, tlv_bytes=status_report)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['matter.sc.status.general_code', 'matter.sc.status.protocol_data', '_ws.col.info'])
+        assert result['matter.sc.status.general_code'] == '8'
+        assert result['matter.sc.status.protocol_data'] == 'f401'
+        assert '(BUSY, BUSY)' in result['_ws.col.info']
+
+    def test_status_report_im_status_code(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A StatusReport for the Interaction Model resolves the IM status code."""
+        # GeneralCode=FAILURE(1), ProtocolId=0x0001 (IM), ProtocolCode=0x87 (CONSTRAINT_ERROR)
+        status_report = struct.pack('<HIH', 1, 0x00000001, 0x0087)
+        pkt = _make_matter_packet(proto_id=0x0000, opcode=0x40, tlv_bytes=status_report)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['_ws.col.info'])
+        assert result['_ws.col.info'].endswith(
+            'Secure Channel: StatusReport (FAILURE, CONSTRAINT_ERROR)')
+
+    def test_status_report_vendor_protocol(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """StatusReport for a vendor protocol splits the vendor ID out of the protocol ID."""
+        status_report = struct.pack('<HIH', 1, 0xFFF10005, 0x1234)
+        pkt = _make_matter_packet(proto_id=0x0000, opcode=0x40, tlv_bytes=status_report)
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['matter.sc.status.protocol_vendor_id', 'matter.sc.status.protocol_id',
+                  'matter.sc.status.protocol_code', '_ws.col.info'])
+        assert result['matter.sc.status.protocol_vendor_id'] == '0xfff1'
+        assert result['matter.sc.status.protocol_id'] == '0x0005'
+        assert result['matter.sc.status.protocol_code'] == '0x1234'
+        assert '(FAILURE, Protocol=0xfff1:0x0005 Code=0x1234)' in result['_ws.col.info']
+
+    def test_status_report_truncated(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A StatusReport shorter than its fixed header is flagged malformed."""
+        pkt = _make_matter_packet(proto_id=0x0000, opcode=0x40, tlv_bytes=bytes(5))
+        result = _tshark_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            pkt, ['_ws.expert.message'])
+        assert 'Malformed' in result['_ws.expert.message']
 
     def test_bdx_payload_not_tlv(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """BDX messages have a fixed layout and are not parsed as TLV."""

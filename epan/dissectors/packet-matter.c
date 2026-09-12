@@ -79,6 +79,11 @@ static int hf_payload_ack_counter;
 static int hf_payload_secured_ext_length;
 static int hf_payload_secured_ext;
 static int hf_payload_application;
+static int hf_sc_status_general_code;
+static int hf_sc_status_protocol_id;
+static int hf_sc_status_protocol_vendor_id;
+static int hf_sc_status_protocol_code;
+static int hf_sc_status_protocol_data;
 
 static int hf_matter_tlv_elem;
 static int hf_matter_tlv_elem_control;
@@ -480,6 +485,39 @@ static const value_string bdx_opcode_vals[] = {
 static const value_string udc_opcode_vals[] = {
     { 0x00, "IdentificationDeclaration" },
     { 0x01, "CommissionerDeclaration" },
+    { 0, NULL }
+};
+
+// Section 4.10.1.3 / Appendix 7.1: StatusReport General Codes
+static const value_string sc_status_general_code_vals[] = {
+    { 0,  "SUCCESS" },
+    { 1,  "FAILURE" },
+    { 2,  "BAD_PRECONDITION" },
+    { 3,  "OUT_OF_RANGE" },
+    { 4,  "BAD_REQUEST" },
+    { 5,  "UNSUPPORTED" },
+    { 6,  "UNEXPECTED" },
+    { 7,  "RESOURCE_EXHAUSTED" },
+    { 8,  "BUSY" },
+    { 9,  "TIMEOUT" },
+    { 10, "CONTINUE" },
+    { 11, "ABORTED" },
+    { 12, "INVALID_ARGUMENT" },
+    { 13, "NOT_FOUND" },
+    { 14, "ALREADY_EXISTS" },
+    { 15, "PERMISSION_DENIED" },
+    { 16, "DATA_LOSS" },
+    { 17, "MESSAGE_TOO_LARGE" },
+    { 0, NULL }
+};
+
+// Section 4.10.1.3.1: Secure Channel Protocol Codes
+static const value_string sc_status_protocol_code_vals[] = {
+    { 0x0000, "SESSION_ESTABLISHMENT_SUCCESS" },
+    { 0x0001, "NO_SHARED_TRUST_ROOTS" },
+    { 0x0002, "INVALID_PARAMETER" },
+    { 0x0003, "CLOSE_SESSION" },
+    { 0x0004, "BUSY" },
     { 0, NULL }
 };
 
@@ -887,6 +925,31 @@ matter_im_opcode_context(uint32_t protocol_id, uint32_t opcode)
 
 static int
 dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo, proto_tree *pl_tree);
+static int
+dissect_matter_status_report(tvbuff_t *tvb, packet_info *pinfo, proto_tree *pl_tree);
+
+// Section 8.10.1: Interaction Model status codes (used in StatusIB and in
+// a StatusReport whose Protocol ID is Interaction Model).
+static const value_string matter_im_status_vals[] = {
+    { 0x00, "SUCCESS" },                 { 0x01, "FAILURE" },
+    { 0x7D, "INVALID_SUBSCRIPTION" },    { 0x7E, "UNSUPPORTED_ACCESS" },
+    { 0x7F, "UNSUPPORTED_ENDPOINT" },    { 0x80, "INVALID_ACTION" },
+    { 0x81, "UNSUPPORTED_COMMAND" },     { 0x85, "INVALID_COMMAND" },
+    { 0x86, "UNSUPPORTED_ATTRIBUTE" },   { 0x87, "CONSTRAINT_ERROR" },
+    { 0x88, "UNSUPPORTED_WRITE" },       { 0x89, "RESOURCE_EXHAUSTED" },
+    { 0x8B, "NOT_FOUND" },               { 0x8C, "UNREPORTABLE_ATTRIBUTE" },
+    { 0x8D, "INVALID_DATA_TYPE" },       { 0x8F, "UNSUPPORTED_READ" },
+    { 0x92, "DATA_VERSION_MISMATCH" },   { 0x94, "TIMEOUT" },
+    { 0x9C, "BUSY" },                    { 0x9D, "ACCESS_RESTRICTED" },
+    { 0xC3, "UNSUPPORTED_CLUSTER" },     { 0xC5, "NO_UPSTREAM_SUBSCRIPTION" },
+    { 0xC6, "NEEDS_TIMED_INTERACTION" }, { 0xC7, "UNSUPPORTED_EVENT" },
+    { 0xC8, "PATHS_EXHAUSTED" },         { 0xC9, "TIMED_REQUEST_MISMATCH" },
+    { 0xCA, "FAILSAFE_REQUIRED" },       { 0xCB, "INVALID_IN_STATE" },
+    { 0xCC, "NO_COMMAND_RESPONSE" },     { 0xCF, "DYNAMIC_CONSTRAINT_ERROR" },
+    { 0xD0, "ALREADY_EXISTS" },          { 0xD1, "INVALID_TRANSPORT_TYPE" },
+    { 0xF0, "WRITE_IGNORED" },
+    { 0, NULL }
+};
 
 // Not every application payload is Matter-TLV encoded. Secure Channel
 // StatusReport (Section 4.10.1.3), MsgCounterSync (Section 4.18.2), ICD
@@ -1284,7 +1347,10 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         offset += secured_ext_len;
     }
     uint32_t application_length = tvb_reported_length_remaining(tvb, offset);
-    if (application_length > 0) {
+    if (protocol_vendor_id == 0 && protocol_id == 0x0000 && protocol_opcode == SC_OPCODE_STATUS_REPORT) {
+        tvbuff_t *sr_tvb = tvb_new_subset_length(tvb, offset, application_length);
+        offset += dissect_matter_status_report(sr_tvb, pinfo, pl_tree);
+    } else if (application_length > 0) {
         proto_item *app_item = proto_tree_add_bytes_format(pl_tree, hf_payload_application, tvb, offset, application_length, NULL, "Application payload (%u bytes)", application_length);
         if (matter_payload_is_tlv(protocol_vendor_id, protocol_id, protocol_opcode)) {
             proto_tree *app_tree = proto_item_add_subtree(app_item, ett_payload);
@@ -1292,8 +1358,50 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
             matter_tlv_context_id_t im_ctx = matter_im_opcode_context(protocol_id, protocol_opcode);
             dissect_matter_tlv_internal(app_tvb, pinfo, app_tree, hf_matter_tlv_elem_tag, im_ctx);
         }
+        offset += application_length;
     }
-    offset += application_length;
+    return offset;
+}
+
+// Section 4.10.1.3: StatusReport
+//   GeneralCode (2) || ProtocolId (4) || ProtocolCode (2) || ProtocolData (variable)
+// ProtocolId carries the Vendor ID in its upper 16 bits.
+static int
+dissect_matter_status_report(tvbuff_t *tvb, packet_info *pinfo, proto_tree *pl_tree)
+{
+    unsigned offset = 0;
+    uint32_t general_code, protocol_id, protocol_vendor_id, protocol_code;
+
+    proto_tree_add_item_ret_uint(pl_tree, hf_sc_status_general_code, tvb, offset, 2, ENC_LITTLE_ENDIAN, &general_code);
+    offset += 2;
+    // Little-endian, so the Protocol ID (lower 16 bits) comes first on the wire.
+    proto_tree_add_item_ret_uint(pl_tree, hf_sc_status_protocol_id, tvb, offset, 2, ENC_LITTLE_ENDIAN, &protocol_id);
+    proto_tree_add_item_ret_uint(pl_tree, hf_sc_status_protocol_vendor_id, tvb, offset + 2, 2, ENC_LITTLE_ENDIAN, &protocol_vendor_id);
+    offset += 4;
+    proto_item *code_item = proto_tree_add_item_ret_uint(pl_tree, hf_sc_status_protocol_code, tvb, offset, 2, ENC_LITTLE_ENDIAN, &protocol_code);
+    if (protocol_vendor_id == 0 && protocol_id == 0x0000)
+        proto_item_append_text(code_item, " (%s)", val_to_str_const(protocol_code, sc_status_protocol_code_vals, "Unknown"));
+    else if (protocol_vendor_id == 0 && protocol_id == 0x0001)
+        proto_item_append_text(code_item, " (%s)", val_to_str_const(protocol_code, matter_im_status_vals, "Unknown"));
+    offset += 2;
+
+    col_append_fstr(pinfo->cinfo, COL_INFO, " (%s",
+                    val_to_str_const(general_code, sc_status_general_code_vals, "Unknown"));
+    if (protocol_vendor_id == 0 && protocol_id == 0x0000)
+        col_append_fstr(pinfo->cinfo, COL_INFO, ", %s)",
+                        val_to_str_const(protocol_code, sc_status_protocol_code_vals, "Unknown"));
+    else if (protocol_vendor_id == 0 && protocol_id == 0x0001)
+        col_append_fstr(pinfo->cinfo, COL_INFO, ", %s)",
+                        val_to_str_const(protocol_code, matter_im_status_vals, "Unknown"));
+    else
+        col_append_fstr(pinfo->cinfo, COL_INFO, ", Protocol=0x%04x:0x%04x Code=0x%04x)",
+                        protocol_vendor_id, protocol_id, protocol_code);
+
+    unsigned data_length = tvb_reported_length_remaining(tvb, offset);
+    if (data_length > 0) {
+        proto_tree_add_item(pl_tree, hf_sc_status_protocol_data, tvb, offset, data_length, ENC_NA);
+        offset += data_length;
+    }
     return offset;
 }
 
@@ -1705,6 +1813,31 @@ proto_register_matter(void)
           { "Secured extensions payload", "matter.payload.secured_ext",
             FT_BYTES, BASE_NONE, NULL, 0,
             NULL, HFILL }
+        },
+        { &hf_sc_status_general_code,
+          { "General Code", "matter.sc.status.general_code",
+            FT_UINT16, BASE_DEC, VALS(sc_status_general_code_vals), 0,
+            "StatusReport general status code", HFILL }
+        },
+        { &hf_sc_status_protocol_vendor_id,
+          { "Protocol Vendor ID", "matter.sc.status.protocol_vendor_id",
+            FT_UINT16, BASE_HEX, NULL, 0,
+            "Vendor ID of the protocol the status applies to", HFILL }
+        },
+        { &hf_sc_status_protocol_id,
+          { "Protocol ID", "matter.sc.status.protocol_id",
+            FT_UINT16, BASE_HEX, VALS(protocol_id_vals), 0,
+            "Protocol the status applies to", HFILL }
+        },
+        { &hf_sc_status_protocol_code,
+          { "Protocol Code", "matter.sc.status.protocol_code",
+            FT_UINT16, BASE_HEX, NULL, 0,
+            "Protocol-specific status code", HFILL }
+        },
+        { &hf_sc_status_protocol_data,
+          { "Protocol Data", "matter.sc.status.protocol_data",
+            FT_BYTES, BASE_NONE, NULL, 0,
+            "Protocol-specific status data", HFILL }
         },
         { &hf_payload_application,
           { "Application payload", "matter.payload.application",
