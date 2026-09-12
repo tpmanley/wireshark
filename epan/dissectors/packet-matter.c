@@ -584,11 +584,12 @@ static const value_string matter_tlv_elem_type_vals[] = {
 };
 
 /*
- * Interaction Model TLV context annotation tables.
+ * TLV context annotation tables.
  *
- * When the application payload belongs to the Interaction Model protocol
- * (protocol_id == 0x0001), the TLV context-specific tags carry semantic
- * meaning defined by the spec (Sections 8.4-8.9).  The tables below map
+ * The context-specific tags of an application payload carry semantic
+ * meaning defined by the spec for the message being sent: the Interaction
+ * Model messages (Sections 8.4-8.9) and the PASE and CASE session
+ * establishment messages (Sections 4.14 and 4.15).  The tables below map
  * each (message-type, tag-number) pair to a human-readable field name and,
  * for container tags (Structures/Arrays/Lists), the child context that
  * should be used when recursing into the container.
@@ -623,6 +624,18 @@ typedef enum {
     MATTER_TLV_CONTEXT_DATA_VERSION_FILTER,
     MATTER_TLV_CONTEXT_CLUSTER_PATH,
     MATTER_TLV_CONTEXT_EVENT_FILTER,
+    /* Secure Channel session establishment (Sections 4.14 and 4.15) */
+    MATTER_TLV_CONTEXT_PBKDF_PARAM_REQUEST,
+    MATTER_TLV_CONTEXT_PBKDF_PARAM_RESPONSE,
+    MATTER_TLV_CONTEXT_PBKDF_PARAMETERS,
+    MATTER_TLV_CONTEXT_PASE_PAKE1,
+    MATTER_TLV_CONTEXT_PASE_PAKE2,
+    MATTER_TLV_CONTEXT_PASE_PAKE3,
+    MATTER_TLV_CONTEXT_CASE_SIGMA1,
+    MATTER_TLV_CONTEXT_CASE_SIGMA2,
+    MATTER_TLV_CONTEXT_CASE_SIGMA2_RESUME,
+    MATTER_TLV_CONTEXT_CASE_SIGMA3,
+    MATTER_TLV_CONTEXT_SESSION_PARAMETERS,
 } matter_tlv_context_id_t;
 
 typedef struct {
@@ -836,6 +849,94 @@ static const matter_tlv_tag_info_t im_cluster_path_tags[] = {
 static int dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                                        int hf_tag, matter_tlv_context_id_t ctx);
 
+/* --- Secure Channel session establishment --- */
+
+// Section 4.13.2.2: Session Parameters (formerly MRP Parameters)
+static const matter_tlv_tag_info_t sc_session_parameters_tags[] = {
+    { 1,    "SESSION_IDLE_INTERVAL",      MATTER_TLV_CONTEXT_NONE },
+    { 2,    "SESSION_ACTIVE_INTERVAL",    MATTER_TLV_CONTEXT_NONE },
+    { 3,    "SESSION_ACTIVE_THRESHOLD",   MATTER_TLV_CONTEXT_NONE },
+    { 4,    "DATA_MODEL_REVISION",        MATTER_TLV_CONTEXT_NONE },
+    { 5,    "INTERACTION_MODEL_REVISION", MATTER_TLV_CONTEXT_NONE },
+    { 6,    "SPECIFICATION_VERSION",      MATTER_TLV_CONTEXT_NONE },
+    { 7,    "MAX_PATHS_PER_INVOKE",       MATTER_TLV_CONTEXT_NONE },
+    { 8,    "SUPPORTED_TRANSPORTS",       MATTER_TLV_CONTEXT_NONE },
+    { 9,    "MAX_TCP_MESSAGE_SIZE",       MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 4.14.1.2: PBKDFParamRequest
+static const matter_tlv_tag_info_t sc_pbkdf_param_request_tags[] = {
+    { 1,    "initiatorRandom",           MATTER_TLV_CONTEXT_NONE },
+    { 2,    "initiatorSessionId",        MATTER_TLV_CONTEXT_NONE },
+    { 3,    "passcodeId",                MATTER_TLV_CONTEXT_NONE },
+    { 4,    "hasPBKDFParameters",        MATTER_TLV_CONTEXT_NONE },
+    { 5,    "initiatorSessionParams",    MATTER_TLV_CONTEXT_SESSION_PARAMETERS },
+};
+
+// Section 4.14.1.3: PBKDFParamResponse
+static const matter_tlv_tag_info_t sc_pbkdf_param_response_tags[] = {
+    { 1,    "initiatorRandom",           MATTER_TLV_CONTEXT_NONE },
+    { 2,    "responderRandom",           MATTER_TLV_CONTEXT_NONE },
+    { 3,    "responderSessionId",        MATTER_TLV_CONTEXT_NONE },
+    { 4,    "pbkdf_parameters",          MATTER_TLV_CONTEXT_PBKDF_PARAMETERS },
+    { 5,    "responderSessionParams",    MATTER_TLV_CONTEXT_SESSION_PARAMETERS },
+};
+
+// Section 4.14.1.3: Crypto_PBKDFParameterSet
+static const matter_tlv_tag_info_t sc_pbkdf_parameters_tags[] = {
+    { 1,    "iterations",                MATTER_TLV_CONTEXT_NONE },
+    { 2,    "salt",                      MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 4.14.1.4: Pake1
+static const matter_tlv_tag_info_t sc_pase_pake1_tags[] = {
+    { 1,    "pA",                        MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 4.14.1.5: Pake2
+static const matter_tlv_tag_info_t sc_pase_pake2_tags[] = {
+    { 1,    "pB",                        MATTER_TLV_CONTEXT_NONE },
+    { 2,    "cB",                        MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 4.14.1.6: Pake3
+static const matter_tlv_tag_info_t sc_pase_pake3_tags[] = {
+    { 1,    "cA",                        MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 4.15.2.2: Sigma1
+static const matter_tlv_tag_info_t sc_case_sigma1_tags[] = {
+    { 1,    "initiatorRandom",           MATTER_TLV_CONTEXT_NONE },
+    { 2,    "initiatorSessionId",        MATTER_TLV_CONTEXT_NONE },
+    { 3,    "destinationId",             MATTER_TLV_CONTEXT_NONE },
+    { 4,    "initiatorEphPubKey",        MATTER_TLV_CONTEXT_NONE },
+    { 5,    "initiatorSessionParams",    MATTER_TLV_CONTEXT_SESSION_PARAMETERS },
+    { 6,    "resumptionID",              MATTER_TLV_CONTEXT_NONE },
+    { 7,    "initiatorResumeMIC",        MATTER_TLV_CONTEXT_NONE },
+};
+
+// Section 4.15.2.3: Sigma2
+static const matter_tlv_tag_info_t sc_case_sigma2_tags[] = {
+    { 1,    "responderRandom",           MATTER_TLV_CONTEXT_NONE },
+    { 2,    "responderSessionId",        MATTER_TLV_CONTEXT_NONE },
+    { 3,    "responderEphPubKey",        MATTER_TLV_CONTEXT_NONE },
+    { 4,    "encrypted2",                MATTER_TLV_CONTEXT_NONE },
+    { 5,    "responderSessionParams",    MATTER_TLV_CONTEXT_SESSION_PARAMETERS },
+};
+
+// Section 4.15.2.4: Sigma2_Resume
+static const matter_tlv_tag_info_t sc_case_sigma2_resume_tags[] = {
+    { 1,    "resumptionID",              MATTER_TLV_CONTEXT_NONE },
+    { 2,    "sigma2ResumeMIC",           MATTER_TLV_CONTEXT_NONE },
+    { 3,    "responderSessionID",        MATTER_TLV_CONTEXT_NONE },
+    { 4,    "responderSessionParams",    MATTER_TLV_CONTEXT_SESSION_PARAMETERS },
+};
+
+// Section 4.15.2.5: Sigma3
+static const matter_tlv_tag_info_t sc_case_sigma3_tags[] = {
+    { 1,    "encrypted3",                MATTER_TLV_CONTEXT_NONE },
+};
+
 /* Master context lookup table */
 typedef struct {
     matter_tlv_context_id_t     context_id;
@@ -872,6 +973,18 @@ static const matter_tlv_context_def_t matter_tlv_contexts[] = {
     { MATTER_TLV_CONTEXT_DATA_VERSION_FILTER, im_data_version_filter_tags, array_length(im_data_version_filter_tags) },
     { MATTER_TLV_CONTEXT_CLUSTER_PATH,       im_cluster_path_tags,       array_length(im_cluster_path_tags) },
     { MATTER_TLV_CONTEXT_EVENT_FILTER,       im_event_filter_tags,       array_length(im_event_filter_tags) },
+    /* Secure Channel session establishment */
+    { MATTER_TLV_CONTEXT_PBKDF_PARAM_REQUEST,  sc_pbkdf_param_request_tags,  array_length(sc_pbkdf_param_request_tags) },
+    { MATTER_TLV_CONTEXT_PBKDF_PARAM_RESPONSE, sc_pbkdf_param_response_tags, array_length(sc_pbkdf_param_response_tags) },
+    { MATTER_TLV_CONTEXT_PBKDF_PARAMETERS,     sc_pbkdf_parameters_tags,     array_length(sc_pbkdf_parameters_tags) },
+    { MATTER_TLV_CONTEXT_PASE_PAKE1,           sc_pase_pake1_tags,           array_length(sc_pase_pake1_tags) },
+    { MATTER_TLV_CONTEXT_PASE_PAKE2,           sc_pase_pake2_tags,           array_length(sc_pase_pake2_tags) },
+    { MATTER_TLV_CONTEXT_PASE_PAKE3,           sc_pase_pake3_tags,           array_length(sc_pase_pake3_tags) },
+    { MATTER_TLV_CONTEXT_CASE_SIGMA1,          sc_case_sigma1_tags,          array_length(sc_case_sigma1_tags) },
+    { MATTER_TLV_CONTEXT_CASE_SIGMA2,          sc_case_sigma2_tags,          array_length(sc_case_sigma2_tags) },
+    { MATTER_TLV_CONTEXT_CASE_SIGMA2_RESUME,   sc_case_sigma2_resume_tags,   array_length(sc_case_sigma2_resume_tags) },
+    { MATTER_TLV_CONTEXT_CASE_SIGMA3,          sc_case_sigma3_tags,          array_length(sc_case_sigma3_tags) },
+    { MATTER_TLV_CONTEXT_SESSION_PARAMETERS,   sc_session_parameters_tags,   array_length(sc_session_parameters_tags) },
 };
 
 /*
@@ -900,27 +1013,47 @@ matter_tlv_tag_name(matter_tlv_context_id_t ctx, uint8_t tag,
 }
 
 /*
- * Map an Interaction Model protocol opcode to the TLV context
- * for annotating the top-level application payload.
+ * Map a protocol opcode to the TLV context for annotating the top-level
+ * application payload.
  */
 static matter_tlv_context_id_t
-matter_im_opcode_context(uint32_t protocol_id, uint32_t opcode)
+matter_payload_context(uint32_t vendor_id, uint32_t protocol_id, uint32_t opcode)
 {
-    if (protocol_id != 0x0001) /* Only Interaction Model */
+    if (vendor_id != 0)
         return MATTER_TLV_CONTEXT_NONE;
-    switch (opcode) {
-    case 0x01: return MATTER_TLV_CONTEXT_STATUS_RESPONSE;
-    case 0x02: return MATTER_TLV_CONTEXT_READ_REQUEST;
-    case 0x03: return MATTER_TLV_CONTEXT_SUBSCRIBE_REQUEST;
-    case 0x04: return MATTER_TLV_CONTEXT_SUBSCRIBE_RESPONSE;
-    case 0x05: return MATTER_TLV_CONTEXT_REPORT_DATA;
-    case 0x06: return MATTER_TLV_CONTEXT_WRITE_REQUEST;
-    case 0x07: return MATTER_TLV_CONTEXT_WRITE_RESPONSE;
-    case 0x08: return MATTER_TLV_CONTEXT_INVOKE_REQUEST;
-    case 0x09: return MATTER_TLV_CONTEXT_INVOKE_RESPONSE;
-    case 0x0A: return MATTER_TLV_CONTEXT_TIMED_REQUEST;
-    default:   return MATTER_TLV_CONTEXT_NONE;
+
+    if (protocol_id == 0x0000) { /* Secure Channel */
+        switch (opcode) {
+        case SC_OPCODE_PBKDF_PARAM_REQUEST:  return MATTER_TLV_CONTEXT_PBKDF_PARAM_REQUEST;
+        case SC_OPCODE_PBKDF_PARAM_RESPONSE: return MATTER_TLV_CONTEXT_PBKDF_PARAM_RESPONSE;
+        case SC_OPCODE_PASE_PAKE1:           return MATTER_TLV_CONTEXT_PASE_PAKE1;
+        case SC_OPCODE_PASE_PAKE2:           return MATTER_TLV_CONTEXT_PASE_PAKE2;
+        case SC_OPCODE_PASE_PAKE3:           return MATTER_TLV_CONTEXT_PASE_PAKE3;
+        case SC_OPCODE_CASE_SIGMA1:          return MATTER_TLV_CONTEXT_CASE_SIGMA1;
+        case SC_OPCODE_CASE_SIGMA2:          return MATTER_TLV_CONTEXT_CASE_SIGMA2;
+        case SC_OPCODE_CASE_SIGMA3:          return MATTER_TLV_CONTEXT_CASE_SIGMA3;
+        case SC_OPCODE_CASE_SIGMA2_RESUME:   return MATTER_TLV_CONTEXT_CASE_SIGMA2_RESUME;
+        default:                             return MATTER_TLV_CONTEXT_NONE;
+        }
     }
+
+    if (protocol_id == 0x0001) { /* Interaction Model */
+        switch (opcode) {
+        case 0x01: return MATTER_TLV_CONTEXT_STATUS_RESPONSE;
+        case 0x02: return MATTER_TLV_CONTEXT_READ_REQUEST;
+        case 0x03: return MATTER_TLV_CONTEXT_SUBSCRIBE_REQUEST;
+        case 0x04: return MATTER_TLV_CONTEXT_SUBSCRIBE_RESPONSE;
+        case 0x05: return MATTER_TLV_CONTEXT_REPORT_DATA;
+        case 0x06: return MATTER_TLV_CONTEXT_WRITE_REQUEST;
+        case 0x07: return MATTER_TLV_CONTEXT_WRITE_RESPONSE;
+        case 0x08: return MATTER_TLV_CONTEXT_INVOKE_REQUEST;
+        case 0x09: return MATTER_TLV_CONTEXT_INVOKE_RESPONSE;
+        case 0x0A: return MATTER_TLV_CONTEXT_TIMED_REQUEST;
+        default:   return MATTER_TLV_CONTEXT_NONE;
+        }
+    }
+
+    return MATTER_TLV_CONTEXT_NONE;
 }
 
 static int
@@ -1355,8 +1488,8 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         if (matter_payload_is_tlv(protocol_vendor_id, protocol_id, protocol_opcode)) {
             proto_tree *app_tree = proto_item_add_subtree(app_item, ett_payload);
             tvbuff_t *app_tvb = tvb_new_subset_length(tvb, offset, application_length);
-            matter_tlv_context_id_t im_ctx = matter_im_opcode_context(protocol_id, protocol_opcode);
-            dissect_matter_tlv_internal(app_tvb, pinfo, app_tree, hf_matter_tlv_elem_tag, im_ctx);
+            matter_tlv_context_id_t ctx = matter_payload_context(protocol_vendor_id, protocol_id, protocol_opcode);
+            dissect_matter_tlv_internal(app_tvb, pinfo, app_tree, hf_matter_tlv_elem_tag, ctx);
         }
         offset += application_length;
     }

@@ -104,6 +104,28 @@ def _tshark_fields(cmd_tshark, cmd_text2pcap, test_env, result_file, packet_byte
     return dict(zip(fields, values))
 
 
+def _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, packet_bytes):
+    """Write a raw packet to pcap and return tshark's verbose (-V) tree output."""
+    hex_dump = "000000 " + " ".join(f"{b:02x}" for b in packet_bytes)
+
+    text_file = result_file('matter_test.txt')
+    pcap_file = result_file('matter_test.pcapng')
+
+    with open(text_file, 'w') as f:
+        f.write(hex_dump + "\n")
+
+    subprocess.check_call(
+        (cmd_text2pcap, '-u', '1234,5678', text_file, pcap_file),
+        env=test_env,
+    )
+
+    result = subprocess.run(
+        (cmd_tshark, '-r', pcap_file, '-d', 'udp.port==1234,matter', '-V'),
+        capture_output=True, check=True, encoding='utf-8', env=test_env,
+    )
+    return result.stdout
+
+
 def _tshark_tlv_fields(cmd_tshark, cmd_text2pcap, test_env, result_file, tlv_bytes, fields):
     """Wrap TLV bytes in an unsecured Matter packet and extract field values via tshark."""
     packet = _MATTER_HEADER + tlv_bytes
@@ -511,6 +533,60 @@ class TestMatterProtocol:
             pkt, ['_ws.col.info', 'matter.tlv.value_uint'])
         assert 'Secure Channel: PBKDFParamRequest' in result['_ws.col.info']
         assert result['matter.tlv.value_uint'] == '42'
+
+    def test_sigma1_fields_annotated(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """CASE Sigma1 context tags are labelled with their spec names."""
+        # Structure {
+        #   1: octets(4)  initiatorRandom   (truncated for the test)
+        #   2: uint16     initiatorSessionId
+        #   3: octets(2)  destinationId
+        #   5: Structure { 1: uint32 SESSION_IDLE_INTERVAL }  initiatorSessionParams
+        # }
+        tlv = bytes.fromhex(
+            '15'
+            '30 01 04 aabbccdd'
+            '25 02 3412'
+            '30 03 02 eeff'
+            '35 05 26 01 00010000 18'
+            '18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0000, opcode=0x30, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert 'Octet String, 1-octet length (initiatorRandom)' in tree
+        assert 'Unsigned Integer, 2-octet value (initiatorSessionId)' in tree
+        assert 'Octet String, 1-octet length (destinationId)' in tree
+        assert 'Structure (initiatorSessionParams)' in tree
+        assert 'Unsigned Integer, 4-octet value (SESSION_IDLE_INTERVAL)' in tree
+
+    def test_pbkdf_param_response_nested(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """PBKDFParamResponse pbkdf_parameters children get their own context."""
+        # Structure { 3: uint16 responderSessionId, 4: Structure { 1: uint32 iterations, 2: octets salt } }
+        tlv = bytes.fromhex(
+            '15'
+            '25 03 0100'
+            '35 04 26 01 e8030000 30 02 02 0102 18'
+            '18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0000, opcode=0x21, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert '(responderSessionId)' in tree
+        assert 'Structure (pbkdf_parameters)' in tree
+        assert '(iterations)' in tree
+        assert '(salt)' in tree
+
+    def test_im_read_request_annotated(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Interaction Model ReadRequest paths are labelled through nested contexts."""
+        # Structure { 0: Array [ Structure { 2: uint8 endpoint=1, 3: uint8 cluster=6, 4: uint8 attribute=0 } ], 3: true }
+        tlv = bytes.fromhex(
+            '15'
+            '36 00 15 24 02 01 24 03 06 24 04 00 18 18'
+            '29 03'
+            '18'.replace(' ', ''))
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x02, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert 'Array (AttributeRequests)' in tree
+        assert '(Endpoint: 1)' in tree
+        assert '(Cluster: On/Off)' in tree
+        assert '(Attribute: 0x0000)' in tree
+        assert 'Boolean True (FabricFiltered)' in tree
 
     def test_secure_channel_msg_counter_sync_not_tlv(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """MsgCounterSyncReq (0x00) carries a raw challenge, not TLV."""
