@@ -122,9 +122,10 @@ static expert_field ei_matter_decryption_failed;
  * The session keys can be exported from the Matter SDK by instrumenting
  * the CASE/PASE session establishment code.
  */
-#define MATTER_SESSION_KEY_LEN   16
-#define MATTER_NONCE_LEN         13
-#define MATTER_MIC_LEN           16  /* AES-128-CCM authentication tag */
+#define MATTER_SESSION_KEY_LEN          16
+#define MATTER_COMPRESSED_FABRIC_ID_LEN 8
+#define MATTER_NONCE_LEN                13
+#define MATTER_MIC_LEN                  16  /* AES-128-CCM authentication tag */
 
 /*
  * UAT (User Accessible Table) for entering CASE/PASE session keys
@@ -258,6 +259,100 @@ hex_to_bytes(const char *hex, uint8_t *out, unsigned len)
     }
     return true;
 }
+
+/*
+ * Group key derivation (Sections 4.16.2 and 4.17.2), all HKDF-SHA256:
+ *   OperationalGroupKey = HKDF(EpochKey,  salt=CompressedFabricID, info="GroupKey v1.0", 16)
+ *   GroupSessionID      = HKDF(OperationalKey, salt=[], info="GroupKeyHash", 2)  (big-endian)
+ *   PrivacyKey          = HKDF(OperationalKey, salt=[], info="PrivacyKey",   16)
+ */
+static void
+matter_hkdf_sha256(const uint8_t *ikm, unsigned ikm_len, const uint8_t *salt, unsigned salt_len,
+                   const uint8_t *info, unsigned info_len, uint8_t *out, unsigned out_len)
+{
+    uint8_t prk[HASH_SHA2_256_LENGTH];
+    hkdf_extract(GCRY_MD_SHA256, salt, salt_len, ikm, ikm_len, prk);
+    hkdf_expand(GCRY_MD_SHA256, prk, sizeof(prk), info, info_len, out, out_len);
+}
+
+static void
+matter_derive_group_keys(const uint8_t *epoch_key, const uint8_t *compressed_fabric_id,
+                         uint8_t *operational_key, uint8_t *privacy_key, uint16_t *group_session_id)
+{
+    static const uint8_t info_group[]   = "GroupKey v1.0"; /* without the NUL terminator */
+    static const uint8_t info_hash[]    = "GroupKeyHash";
+    static const uint8_t info_privacy[] = "PrivacyKey";
+    uint8_t gsid[2];
+
+    matter_hkdf_sha256(epoch_key, MATTER_SESSION_KEY_LEN, compressed_fabric_id, MATTER_COMPRESSED_FABRIC_ID_LEN,
+                       info_group, sizeof(info_group) - 1, operational_key, MATTER_SESSION_KEY_LEN);
+    matter_hkdf_sha256(operational_key, MATTER_SESSION_KEY_LEN, NULL, 0,
+                       info_hash, sizeof(info_hash) - 1, gsid, sizeof(gsid));
+    *group_session_id = (uint16_t)((gsid[0] << 8) | gsid[1]); /* big-endian */
+    matter_hkdf_sha256(operational_key, MATTER_SESSION_KEY_LEN, NULL, 0,
+                       info_privacy, sizeof(info_privacy) - 1, privacy_key, MATTER_SESSION_KEY_LEN);
+}
+
+/*
+ * UAT for group (multicast) keys. Each row holds an epoch key and the
+ * compressed fabric ID; the operational key, privacy key and group
+ * session ID are derived from them when the row is committed.
+ */
+typedef struct {
+    char *epoch_key;              /* 32 hex chars (16 bytes) */
+    char *compressed_fabric_id;   /* 16 hex chars (8 bytes) */
+
+    uint8_t  epoch_key_bytes[MATTER_SESSION_KEY_LEN];
+    uint8_t  compressed_fabric_id_bytes[MATTER_COMPRESSED_FABRIC_ID_LEN];
+    uint8_t  operational_key[MATTER_SESSION_KEY_LEN];
+    uint8_t  privacy_key[MATTER_SESSION_KEY_LEN];
+    uint16_t group_session_id;
+} matter_group_key_uat_record_t;
+
+static matter_group_key_uat_record_t *matter_group_key_uat_records;
+static unsigned                       num_matter_group_key_uat_records;
+
+static void *
+matter_group_key_uat_copy_cb(void *dest, const void *source, size_t len _U_)
+{
+    const matter_group_key_uat_record_t *s = (const matter_group_key_uat_record_t *)source;
+    matter_group_key_uat_record_t       *d = (matter_group_key_uat_record_t *)dest;
+    *d = *s;
+    d->epoch_key            = g_strdup(s->epoch_key);
+    d->compressed_fabric_id = g_strdup(s->compressed_fabric_id);
+    return dest;
+}
+
+static bool
+matter_group_key_uat_update_cb(void *r, char **error)
+{
+    matter_group_key_uat_record_t *rec = (matter_group_key_uat_record_t *)r;
+
+    if (!rec->epoch_key || strlen(rec->epoch_key) != 2 * MATTER_SESSION_KEY_LEN ||
+        !hex_to_bytes(rec->epoch_key, rec->epoch_key_bytes, MATTER_SESSION_KEY_LEN)) {
+        *error = g_strdup("Epoch key must be exactly 32 hex characters");
+        return false;
+    }
+    if (!rec->compressed_fabric_id || strlen(rec->compressed_fabric_id) != 2 * MATTER_COMPRESSED_FABRIC_ID_LEN ||
+        !hex_to_bytes(rec->compressed_fabric_id, rec->compressed_fabric_id_bytes, MATTER_COMPRESSED_FABRIC_ID_LEN)) {
+        *error = g_strdup("Compressed Fabric ID must be exactly 16 hex characters");
+        return false;
+    }
+    matter_derive_group_keys(rec->epoch_key_bytes, rec->compressed_fabric_id_bytes,
+                             rec->operational_key, rec->privacy_key, &rec->group_session_id);
+    return true;
+}
+
+static void
+matter_group_key_uat_free_cb(void *r)
+{
+    matter_group_key_uat_record_t *rec = (matter_group_key_uat_record_t *)r;
+    g_free(rec->epoch_key);
+    g_free(rec->compressed_fabric_id);
+}
+
+UAT_CSTRING_CB_DEF(matter_group_key_uat, epoch_key, matter_group_key_uat_record_t)
+UAT_CSTRING_CB_DEF(matter_group_key_uat, compressed_fabric_id, matter_group_key_uat_record_t)
 
 /*
  * A session key together with the source node ID to use in the nonce.
@@ -1391,24 +1486,42 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             from_cache = (decrypted_tvb != NULL);
         }
 
-        for (unsigned i = 0; i < num_matter_key_uat_records && !decrypted_tvb; i++) {
-            const matter_key_uat_record_t *rec = &matter_key_uat_records[i];
-
-            if (rec->has_i2r_key) {
+        if (message_session_type == SECURITY_FLAG_SESSION_TYPE_GROUP) {
+            /* Group session: the session ID in the header is the derived
+             * Group Session ID, so only keys whose derived ID matches are
+             * tried (a 16-bit hash, so more than one may match).  The
+             * source node ID for the nonce always comes from the header. */
+            for (unsigned i = 0; i < num_matter_group_key_uat_records && !decrypted_tvb; i++) {
+                const matter_group_key_uat_record_t *rec = &matter_group_key_uat_records[i];
+                if (rec->group_session_id != session_id)
+                    continue;
                 num_keys++;
-                memcpy(winner.key, rec->i2r_key_bytes, MATTER_SESSION_KEY_LEN);
-                winner.node_id = rec->initiator_node_id;
-                winner.has_node_id = rec->has_initiator_node_id;
+                memcpy(winner.key, rec->operational_key, MATTER_SESSION_KEY_LEN);
+                winner.node_id = 0;
+                winner.has_node_id = false;
                 decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
                                                        security_flags, message_counter, source_node_id, &winner);
             }
-            if (rec->has_r2i_key && !decrypted_tvb) {
-                num_keys++;
-                memcpy(winner.key, rec->r2i_key_bytes, MATTER_SESSION_KEY_LEN);
-                winner.node_id = rec->responder_node_id;
-                winner.has_node_id = rec->has_responder_node_id;
-                decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
-                                                       security_flags, message_counter, source_node_id, &winner);
+        } else {
+            for (unsigned i = 0; i < num_matter_key_uat_records && !decrypted_tvb; i++) {
+                const matter_key_uat_record_t *rec = &matter_key_uat_records[i];
+
+                if (rec->has_i2r_key) {
+                    num_keys++;
+                    memcpy(winner.key, rec->i2r_key_bytes, MATTER_SESSION_KEY_LEN);
+                    winner.node_id = rec->initiator_node_id;
+                    winner.has_node_id = rec->has_initiator_node_id;
+                    decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                           security_flags, message_counter, source_node_id, &winner);
+                }
+                if (rec->has_r2i_key && !decrypted_tvb) {
+                    num_keys++;
+                    memcpy(winner.key, rec->r2i_key_bytes, MATTER_SESSION_KEY_LEN);
+                    winner.node_id = rec->responder_node_id;
+                    winner.has_node_id = rec->has_responder_node_id;
+                    decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                           security_flags, message_counter, source_node_id, &winner);
+                }
             }
         }
 
@@ -2183,6 +2296,38 @@ proto_register_matter(void)
             "present in the message header. All entries are tried against\n"
             "every secured packet; MIC verification determines the match.",
             matter_keys_uat);
+
+    /* UAT for group (multicast) keys */
+    static uat_field_t matter_group_key_uat_fields[] = {
+        UAT_FLD_CSTRING(matter_group_key_uat, epoch_key, "Epoch Key",
+                        "Operational group epoch key (32 hex chars)"),
+        UAT_FLD_CSTRING(matter_group_key_uat, compressed_fabric_id, "Compressed Fabric ID",
+                        "64-bit compressed fabric identifier (16 hex chars)"),
+        UAT_END_FIELDS
+    };
+
+    uat_t *matter_group_keys_uat = uat_new("Matter Group Keys",
+            sizeof(matter_group_key_uat_record_t),
+            "matter_group_keys",
+            true,
+            &matter_group_key_uat_records,
+            &num_matter_group_key_uat_records,
+            UAT_AFFECTS_DISSECTION,
+            NULL,
+            matter_group_key_uat_copy_cb,
+            matter_group_key_uat_update_cb,
+            matter_group_key_uat_free_cb,
+            NULL,
+            NULL,
+            matter_group_key_uat_fields);
+
+    prefs_register_uat_preference(matter_module, "group_keys",
+            "Group keys",
+            "A table of Matter group (multicast) keys for decryption.\n"
+            "Enter the operational group epoch key (32 hex characters) and\n"
+            "the compressed fabric ID (16 hex characters). The operational\n"
+            "key, group session ID and privacy key are derived from them.",
+            matter_group_keys_uat);
 }
 
 void

@@ -1134,7 +1134,7 @@ _ENC_SESSION_ID = 0x002A
 
 def _tshark_decrypt_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
                            packet_bytes, fields,
-                           uat_entries=None, dst_port=5540):
+                           uat_entries=None, group_entries=None, dst_port=5540):
     """Write encrypted packet to pcap and extract fields via tshark with decryption.
 
     Decryption keys are provided via uat_entries: a list of UAT row dicts
@@ -1165,6 +1165,11 @@ def _tshark_decrypt_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
             r2i = entry.get('r2i_key', '')
             uat_row = f'"{init_nid}","{resp_nid}","{i2r}","{r2i}"'
             args.extend(['-o', f'uat:matter_session_keys:{uat_row}'])
+
+    if group_entries:
+        for entry in group_entries:
+            row = '"{}","{}"'.format(entry['epoch_key'], entry['compressed_fabric_id'])
+            args.extend(['-o', f'uat:matter_group_keys:{row}'])
 
     result = subprocess.run(
         args, capture_output=True, check=True, encoding='utf-8', env=test_env,
@@ -1210,6 +1215,62 @@ def _tshark_decrypt_capture(cmd_tshark, cmd_text2pcap, test_env, result_file,
         values = line.split('\t')
         rows.append(dict(zip(fields, values)))
     return rows
+
+
+# ── Group (multicast) session test vectors (MR-group) ───────────────
+# Derived from epoch key 235bf7e62823d358dca4ba50b1535f4b and compressed
+# fabric ID 87e1b004e235a130 (the spec 4.3.2.2 example), giving group
+# session ID 0xB9F7. Payload is an IM ReportData (opcode 0x05) + uint8=42.
+_GROUP_EPOCH_KEY = '235bf7e62823d358dca4ba50b1535f4b'
+_GROUP_CFID = '87e1b004e235a130'
+_GROUP_SESSION_ID = 0xB9F7
+_ENC_PKT_GROUP = bytes.fromhex(
+    '06f7b9010700000088776655443322110200'
+    '356799d1889419a1b3409efcce1131c3acbe084119dc23ab')
+_ENC_PKT_GROUP_PRIVACY = bytes.fromhex(
+    '06f7b981afe2faa5bc7ac7bed54a7af840'
+    '3ec87f33b31557473a42bc62183efc680e4375afd3341f2f60')
+
+
+class TestMatterGroupDecryption:
+    """Group (multicast) session decryption via derived group keys."""
+
+    def test_group_session_id_derivation(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """The epoch key + compressed fabric ID resolve to the right session and decrypt."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP, ['matter.message.session_id', 'matter.message.session_type', '_ws.col.Info'],
+            group_entries=[{'epoch_key': _GROUP_EPOCH_KEY, 'compressed_fabric_id': _GROUP_CFID}])
+        assert result['matter.message.session_id'] == f'0x{_GROUP_SESSION_ID:04x}'
+        assert result['matter.message.session_type'] == '0x01'
+        assert '[Decrypted]' in result['_ws.col.Info']
+        assert 'ReportData' in result['_ws.col.Info']
+
+    def test_group_decrypt_payload_tlv(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """The decrypted group payload is dissected as Matter TLV."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP, ['matter.tlv.value_uint'],
+            group_entries=[{'epoch_key': _GROUP_EPOCH_KEY, 'compressed_fabric_id': _GROUP_CFID}])
+        assert result['matter.tlv.value_uint'] == '42'
+
+    def test_group_no_key(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Without a group key the payload stays encrypted."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP, ['matter.decryption.no_key', '_ws.col.Info'])
+        assert result['matter.decryption.no_key'] != ''
+        assert '[Decrypted]' not in result['_ws.col.Info']
+
+    def test_group_wrong_fabric(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A key deriving to a different session ID is not even tried (no failure noise)."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP, ['matter.decryption.no_key', 'matter.decryption.failed'],
+            group_entries=[{'epoch_key': 'ff' * 16, 'compressed_fabric_id': '00' * 8}])
+        # Derived session ID differs from 0xB9F7, so it is skipped -> "no key".
+        assert result['matter.decryption.no_key'] != ''
+        assert result['matter.decryption.failed'] == ''
 
 
 class TestMatterDecryption:
