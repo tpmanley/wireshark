@@ -39,19 +39,24 @@ for f in sorted(glob.glob(os.path.join(clusters_dir, "*.xml"))):
                 pass
     if not cids:
         continue
-    attrs, cmds = {}, {}
+    attrs, cmds, rsps = {}, {}, {}
     for a in root.findall("attributes/attribute"):
         aid, name = a.get("id"), a.get("name")
         if aid and name:
             attrs.setdefault(int(aid, 16), name)
     for c in root.findall("commands/command"):
         cidn, name, direction = c.get("id"), c.get("name"), c.get("direction", "")
-        if cidn and name and direction == "commandToServer":
-            cmds.setdefault(int(cidn, 16), name)
+        if not (cidn and name):
+            continue
+        if direction == "commandToServer":
+            cmds.setdefault(int(cidn, 16), name)      # client -> server (request)
+        elif direction == "responseFromServer":
+            rsps.setdefault(int(cidn, 16), name)      # server -> client (response)
     for cid in cids:
-        m = members.setdefault(cid, {"cmds": {}, "attrs": {}})
+        m = members.setdefault(cid, {"cmds": {}, "rsps": {}, "attrs": {}})
         m["attrs"].update(attrs)
         m["cmds"].update(cmds)
+        m["rsps"].update(rsps)
 
 def esc(s): return s.replace('"', '\\"')
 
@@ -70,7 +75,7 @@ for cid in sorted(ids):
 out.append("    { 0, NULL }\n};\n")
 
 # Per-cluster command/attribute value_strings
-have = sorted(c for c in members if members[c]["cmds"] or members[c]["attrs"])
+have = sorted(c for c in members if members[c]["cmds"] or members[c]["rsps"] or members[c]["attrs"])
 for cid in have:
     m = members[cid]
     if m["cmds"]:
@@ -78,34 +83,54 @@ for cid in have:
         for i in sorted(m["cmds"]):
             out.append(f'    {{ 0x{i:02X}, "{esc(m["cmds"][i])}" }},')
         out.append("    { 0, NULL }\n};")
+    if m["rsps"]:
+        out.append(f"static const value_string matter_rsp_{cid:04x}_vals[] = {{")
+        for i in sorted(m["rsps"]):
+            out.append(f'    {{ 0x{i:02X}, "{esc(m["rsps"][i])}" }},')
+        out.append("    { 0, NULL }\n};")
     if m["attrs"]:
         out.append(f"static const value_string matter_attr_{cid:04x}_vals[] = {{")
         for i in sorted(m["attrs"]):
             out.append(f'    {{ 0x{i:04X}, "{esc(m["attrs"][i])}" }},')
         out.append("    { 0, NULL }\n};")
 
-out.append("\ntypedef struct { uint32_t cluster_id; const value_string *cmds; const value_string *attrs; } matter_cluster_members_t;\n")
+out.append("\ntypedef struct { uint32_t cluster_id; const value_string *cmds; const value_string *rsps; const value_string *attrs; } matter_cluster_members_t;\n")
 out.append("static const matter_cluster_members_t matter_cluster_members[] = {")
 for cid in have:
     m = members[cid]
     cn = f"matter_cmd_{cid:04x}_vals" if m["cmds"] else "NULL"
+    rn = f"matter_rsp_{cid:04x}_vals" if m["rsps"] else "NULL"
     an = f"matter_attr_{cid:04x}_vals" if m["attrs"] else "NULL"
-    out.append(f"    {{ {c_ident(cid)}, {cn}, {an} }},")
+    out.append(f"    {{ {c_ident(cid)}, {cn}, {rn}, {an} }},")
 out.append("};\n")
 
-out.append("""const char *
-matter_cluster_member_name(uint32_t cluster_id, bool is_command, uint32_t id)
+out.append("""static const matter_cluster_members_t *
+matter_cluster_lookup(uint32_t cluster_id)
 {
-    for (unsigned i = 0; i < array_length(matter_cluster_members); i++) {
-        if (matter_cluster_members[i].cluster_id == cluster_id) {
-            const value_string *vs = is_command ? matter_cluster_members[i].cmds
-                                                 : matter_cluster_members[i].attrs;
-            return vs ? try_val_to_str(id, vs) : NULL;
-        }
-    }
+    for (unsigned i = 0; i < array_length(matter_cluster_members); i++)
+        if (matter_cluster_members[i].cluster_id == cluster_id)
+            return &matter_cluster_members[i];
     return NULL;
+}
+
+const char *
+matter_cluster_attribute_name(uint32_t cluster_id, uint32_t id)
+{
+    const matter_cluster_members_t *m = matter_cluster_lookup(cluster_id);
+    return (m && m->attrs) ? try_val_to_str(id, m->attrs) : NULL;
+}
+
+const char *
+matter_cluster_command_name(uint32_t cluster_id, uint32_t id, bool is_response)
+{
+    const matter_cluster_members_t *m = matter_cluster_lookup(cluster_id);
+    if (!m)
+        return NULL;
+    const value_string *vs = is_response ? m->rsps : m->cmds;
+    return vs ? try_val_to_str(id, vs) : NULL;
 }""")
 sys.stdout.write("\n".join(out) + "\n")
-sys.stderr.write(f"clusters with members: {len(have)}; total attrs: "
+sys.stderr.write(f"clusters with members: {len(have)}; attrs: "
                  f"{sum(len(members[c]['attrs']) for c in have)}; "
-                 f"cmds: {sum(len(members[c]['cmds']) for c in have)}\n")
+                 f"cmds: {sum(len(members[c]['cmds']) for c in have)}; "
+                 f"rsps: {sum(len(members[c]['rsps']) for c in have)}\n")

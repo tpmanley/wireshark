@@ -919,7 +919,9 @@ typedef enum {
     MATTER_TLV_CONTEXT_ATTRIBUTE_PATH,
     MATTER_TLV_CONTEXT_EVENT_PATH,
     MATTER_TLV_CONTEXT_COMMAND_PATH,
+    MATTER_TLV_CONTEXT_COMMAND_PATH_RESPONSE,
     MATTER_TLV_CONTEXT_COMMAND_DATA,
+    MATTER_TLV_CONTEXT_COMMAND_DATA_RESPONSE,
     MATTER_TLV_CONTEXT_INVOKE_RESPONSE_IB,
     MATTER_TLV_CONTEXT_COMMAND_STATUS,
     MATTER_TLV_CONTEXT_STATUS_IB,
@@ -1073,6 +1075,13 @@ static const matter_tlv_tag_info_t im_command_path_tags[] = {
     { 2,    "Command",                   MATTER_TLV_CONTEXT_NONE },
 };
 
+// CommandPathIB reached through an InvokeResponse's response command.
+static const matter_tlv_tag_info_t im_command_path_response_tags[] = {
+    { 0,    "Endpoint",                  MATTER_TLV_CONTEXT_NONE },
+    { 1,    "Cluster",                   MATTER_TLV_CONTEXT_NONE },
+    { 2,    "Command",                   MATTER_TLV_CONTEXT_NONE },
+};
+
 // Section 8.9.2.11: CommandDataIB
 static const matter_tlv_tag_info_t im_command_data_tags[] = {
     { 0,    "CommandPath",               MATTER_TLV_CONTEXT_COMMAND_PATH },
@@ -1080,9 +1089,17 @@ static const matter_tlv_tag_info_t im_command_data_tags[] = {
     { 2,    "CommandRef",                MATTER_TLV_CONTEXT_NONE },
 };
 
+// A CommandDataIB inside an InvokeResponse carries a response command, so its
+// CommandPath resolves against the response command table.
+static const matter_tlv_tag_info_t im_command_data_response_tags[] = {
+    { 0,    "CommandPath",               MATTER_TLV_CONTEXT_COMMAND_PATH_RESPONSE },
+    { 1,    "CommandFields",             MATTER_TLV_CONTEXT_NONE },
+    { 2,    "CommandRef",                MATTER_TLV_CONTEXT_NONE },
+};
+
 // Section 8.9.2.12: InvokeResponseIB
 static const matter_tlv_tag_info_t im_invoke_response_ib_tags[] = {
-    { 0,    "Command",                   MATTER_TLV_CONTEXT_COMMAND_DATA },
+    { 0,    "Command",                   MATTER_TLV_CONTEXT_COMMAND_DATA_RESPONSE },
     { 1,    "Status",                    MATTER_TLV_CONTEXT_COMMAND_STATUS },
 };
 
@@ -1268,7 +1285,9 @@ static const matter_tlv_context_def_t matter_tlv_contexts[] = {
     { MATTER_TLV_CONTEXT_ATTRIBUTE_PATH,     im_attribute_path_tags,     array_length(im_attribute_path_tags) },
     { MATTER_TLV_CONTEXT_EVENT_PATH,         im_event_path_tags,         array_length(im_event_path_tags) },
     { MATTER_TLV_CONTEXT_COMMAND_PATH,       im_command_path_tags,       array_length(im_command_path_tags) },
+    { MATTER_TLV_CONTEXT_COMMAND_PATH_RESPONSE, im_command_path_response_tags, array_length(im_command_path_response_tags) },
     { MATTER_TLV_CONTEXT_COMMAND_DATA,       im_command_data_tags,       array_length(im_command_data_tags) },
+    { MATTER_TLV_CONTEXT_COMMAND_DATA_RESPONSE, im_command_data_response_tags, array_length(im_command_data_response_tags) },
     { MATTER_TLV_CONTEXT_INVOKE_RESPONSE_IB, im_invoke_response_ib_tags, array_length(im_invoke_response_ib_tags) },
     { MATTER_TLV_CONTEXT_COMMAND_STATUS,     im_command_status_tags,     array_length(im_command_status_tags) },
     { MATTER_TLV_CONTEXT_STATUS_IB,          im_status_ib_tags,          array_length(im_status_ib_tags) },
@@ -2166,7 +2185,7 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                 } else if (is_endpoint_tag) {
                     proto_item_append_text(ti_element, " (Endpoint: %u)", val);
                 } else if (is_attribute_tag) {
-                    const char *an = matter_cluster_member_name(current_cluster, false, val);
+                    const char *an = matter_cluster_attribute_name(current_cluster, val);
                     if (an)
                         proto_item_append_text(ti_element, " (Attribute: %s)", an);
                     else
@@ -2175,7 +2194,8 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                     proto_item_append_text(ti_element, " (Status: %s)",
                                            val_to_str_const(val, matter_im_status_vals, "Unknown"));
                 } else if (is_command_tag) {
-                    const char *cn = matter_cluster_member_name(current_cluster, true, val);
+                    bool is_resp = (ctx == MATTER_TLV_CONTEXT_COMMAND_PATH_RESPONSE);
+                    const char *cn = matter_cluster_command_name(current_cluster, val, is_resp);
                     if (cn)
                         proto_item_append_text(ti_element, " (Command: %s)", cn);
                     else

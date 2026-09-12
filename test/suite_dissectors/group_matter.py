@@ -1345,6 +1345,34 @@ class TestMatterGroupDecryption:
         assert '(Cluster: Group Key Management)' in tree
         assert '(Attribute: GroupTable)' in tree
 
+    def test_invoke_response_command_name(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A response command path resolves against the response command table."""
+        # InvokeResponse: InvokeResponseIB{ Command = CommandDataIB{ CommandPath{
+        #   endpoint=1, cluster=0x0004 (Groups), command=0x00 } } } -> AddGroupResponse
+        tlv = bytes.fromhex('15280036011535003500240001250104002402001835011818181824ff0118')
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x09, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert '(Cluster: Groups)' in tree
+        assert '(Command: AddGroupResponse)' in tree
+
+    def test_invoke_response_status_uses_request_command(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A CommandStatusIB path in a response names the invoked (request) command."""
+        # InvokeResponseIB{ Status = CommandStatusIB{ CommandPath{ ep=1,
+        #   cluster=0x0004, command=0x00 }, Status{ status=0 } } } -> AddGroup (request)
+        tlv = bytes.fromhex('15280036011535013500240001250104002402001835012400001818181824ff0118')
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x09, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert '(Command: AddGroup)' in tree
+        assert '(Command: AddGroupResponse)' not in tree
+
+    def test_invoke_request_command_name(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A request command path still resolves against the request command table."""
+        # InvokeRequest CommandDataIB{ CommandPath{ ep=1, cluster=0x0004, command=0x00 } }
+        tlv = bytes.fromhex('152800280136021535002400012501040024020018350118181824ff0118')
+        pkt = _make_matter_packet(proto_id=0x0001, opcode=0x08, tlv_bytes=tlv)
+        tree = _tshark_tree(cmd_tshark, cmd_text2pcap, test_env, result_file, pkt)
+        assert '(Command: AddGroup)' in tree
+
     def test_group_multicast_address(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """A group message on an operational multicast address exposes fabric and group IDs."""
         # FF35:0040:FD<fabric 2906c908d115d362>:00<group 0002>

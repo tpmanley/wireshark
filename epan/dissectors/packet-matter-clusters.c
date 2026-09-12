@@ -166,6 +166,13 @@ static const value_string matter_cmd_0004_vals[] = {
     { 0x05, "AddGroupIfIdentifying" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0004_vals[] = {
+    { 0x00, "AddGroupResponse" },
+    { 0x01, "ViewGroupResponse" },
+    { 0x02, "GetGroupMembershipResponse" },
+    { 0x03, "RemoveGroupResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0004_vals[] = {
     { 0x0000, "NameSupport" },
     { 0, NULL }
@@ -233,6 +240,10 @@ static const value_string matter_cmd_001f_vals[] = {
     { 0x00, "ReviewFabricRestrictions" },
     { 0, NULL }
 };
+static const value_string matter_rsp_001f_vals[] = {
+    { 0x01, "ReviewFabricRestrictionsResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_001f_vals[] = {
     { 0x0000, "ACL" },
     { 0x0001, "Extension" },
@@ -296,6 +307,11 @@ static const value_string matter_cmd_0029_vals[] = {
     { 0x00, "QueryImage" },
     { 0x02, "ApplyUpdateRequest" },
     { 0x04, "NotifyUpdateApplied" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0029_vals[] = {
+    { 0x01, "QueryImageResponse" },
+    { 0x03, "ApplyUpdateResponse" },
     { 0, NULL }
 };
 static const value_string matter_cmd_002a_vals[] = {
@@ -371,6 +387,13 @@ static const value_string matter_cmd_0030_vals[] = {
     { 0x06, "SetTCAcknowledgements" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0030_vals[] = {
+    { 0x01, "ArmFailSafeResponse" },
+    { 0x03, "SetRegulatoryConfigResponse" },
+    { 0x05, "CommissioningCompleteResponse" },
+    { 0x07, "SetTCAcknowledgementsResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0030_vals[] = {
     { 0x0000, "Breadcrumb" },
     { 0x0001, "BasicCommissioningInfo" },
@@ -396,6 +419,12 @@ static const value_string matter_cmd_0031_vals[] = {
     { 0x08, "ReorderNetwork" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0031_vals[] = {
+    { 0x01, "ScanNetworksResponse" },
+    { 0x05, "NetworkConfigResponse" },
+    { 0x07, "ConnectNetworkResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0031_vals[] = {
     { 0x0000, "MaxNetworks" },
     { 0x0001, "Networks" },
@@ -414,10 +443,19 @@ static const value_string matter_cmd_0032_vals[] = {
     { 0x00, "RetrieveLogsRequest" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0032_vals[] = {
+    { 0x01, "RetrieveLogsResponse" },
+    { 0, NULL }
+};
 static const value_string matter_cmd_0033_vals[] = {
     { 0x00, "TestEventTrigger" },
     { 0x01, "TimeSnapshot" },
     { 0x03, "PayloadTestRequest" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0033_vals[] = {
+    { 0x02, "TimeSnapshotResponse" },
+    { 0x04, "PayloadTestResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0033_vals[] = {
@@ -561,6 +599,10 @@ static const value_string matter_cmd_0038_vals[] = {
     { 0x05, "SetDefaultNTP" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0038_vals[] = {
+    { 0x03, "SetTimeZoneResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0038_vals[] = {
     { 0x0000, "UTCTime" },
     { 0x0001, "Granularity" },
@@ -639,6 +681,14 @@ static const value_string matter_cmd_003e_vals[] = {
     { 0x0D, "SignVIDVerificationRequest" },
     { 0, NULL }
 };
+static const value_string matter_rsp_003e_vals[] = {
+    { 0x01, "AttestationResponse" },
+    { 0x03, "CertificateChainResponse" },
+    { 0x05, "CSRResponse" },
+    { 0x08, "NOCResponse" },
+    { 0x0E, "SignVIDVerificationResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_003e_vals[] = {
     { 0x0000, "NOCs" },
     { 0x0001, "Fabrics" },
@@ -653,6 +703,11 @@ static const value_string matter_cmd_003f_vals[] = {
     { 0x01, "KeySetRead" },
     { 0x03, "KeySetRemove" },
     { 0x04, "KeySetReadAllIndices" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_003f_vals[] = {
+    { 0x02, "KeySetReadResponse" },
+    { 0x05, "KeySetReadAllIndicesResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_003f_vals[] = {
@@ -679,6 +734,11 @@ static const value_string matter_cmd_0046_vals[] = {
     { 0x00, "RegisterClient" },
     { 0x02, "UnregisterClient" },
     { 0x03, "StayActiveRequest" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0046_vals[] = {
+    { 0x01, "RegisterClientResponse" },
+    { 0x04, "StayActiveResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0046_vals[] = {
@@ -830,6 +890,10 @@ static const value_string matter_cmd_0060_vals[] = {
     { 0x03, "Resume" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0060_vals[] = {
+    { 0x04, "OperationalCommandResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0060_vals[] = {
     { 0x0000, "PhaseList" },
     { 0x0001, "CurrentPhase" },
@@ -852,6 +916,16 @@ static const value_string matter_cmd_0062_vals[] = {
     { 0x05, "RecallScene" },
     { 0x06, "GetSceneMembership" },
     { 0x40, "CopyScene" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0062_vals[] = {
+    { 0x00, "AddSceneResponse" },
+    { 0x01, "ViewSceneResponse" },
+    { 0x02, "RemoveSceneResponse" },
+    { 0x03, "RemoveAllScenesResponse" },
+    { 0x04, "StoreSceneResponse" },
+    { 0x06, "GetSceneMembershipResponse" },
+    { 0x40, "CopySceneResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0062_vals[] = {
@@ -879,6 +953,10 @@ static const value_string matter_cmd_0065_vals[] = {
     { 0x03, "UpdateGroupKey" },
     { 0x04, "ConfigureAuxiliaryACL" },
     { 0x05, "GroupcastTesting" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0065_vals[] = {
+    { 0x02, "LeaveGroupResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0065_vals[] = {
@@ -1013,6 +1091,11 @@ static const value_string matter_cmd_0095_vals[] = {
     { 0x02, "GetDetailedForecastRequest" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0095_vals[] = {
+    { 0x01, "GetDetailedPriceResponse" },
+    { 0x03, "GetDetailedForecastResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0095_vals[] = {
     { 0x0000, "TariffUnit" },
     { 0x0001, "Currency" },
@@ -1060,6 +1143,10 @@ static const value_string matter_cmd_0099_vals[] = {
     { 0x05, "SetTargets" },
     { 0x06, "GetTargets" },
     { 0x07, "ClearTargets" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0099_vals[] = {
+    { 0x00, "GetTargetsResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0099_vals[] = {
@@ -1151,6 +1238,15 @@ static const value_string matter_cmd_0101_vals[] = {
     { 0x27, "UnboltDoor" },
     { 0x28, "SetAliroReaderConfig" },
     { 0x29, "ClearAliroReaderConfig" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0101_vals[] = {
+    { 0x0C, "GetWeekDayScheduleResponse" },
+    { 0x0F, "GetYearDayScheduleResponse" },
+    { 0x12, "GetHolidayScheduleResponse" },
+    { 0x1C, "GetUserResponse" },
+    { 0x23, "SetCredentialResponse" },
+    { 0x25, "GetCredentialStatusResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0101_vals[] = {
@@ -1267,6 +1363,11 @@ static const value_string matter_cmd_0150_vals[] = {
     { 0x02, "SkipArea" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0150_vals[] = {
+    { 0x01, "SelectAreasResponse" },
+    { 0x03, "SkipAreaResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0150_vals[] = {
     { 0x0000, "SupportedAreas" },
     { 0x0001, "SupportedMaps" },
@@ -1309,6 +1410,10 @@ static const value_string matter_cmd_0201_vals[] = {
     { 0x06, "SetActivePresetRequest" },
     { 0x07, "AddThermostatSuggestion" },
     { 0x08, "RemoveThermostatSuggestion" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0201_vals[] = {
+    { 0x02, "AddThermostatSuggestionResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0201_vals[] = {
@@ -1699,6 +1804,10 @@ static const value_string matter_cmd_0451_vals[] = {
     { 0x00, "NetworkPassphraseRequest" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0451_vals[] = {
+    { 0x01, "NetworkPassphraseResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0451_vals[] = {
     { 0x0000, "SSID" },
     { 0x0001, "PassphraseSurrogate" },
@@ -1709,6 +1818,10 @@ static const value_string matter_cmd_0452_vals[] = {
     { 0x01, "GetPendingDatasetRequest" },
     { 0x03, "SetActiveDatasetRequest" },
     { 0x04, "SetPendingDatasetRequest" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0452_vals[] = {
+    { 0x02, "DatasetResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0452_vals[] = {
@@ -1724,6 +1837,10 @@ static const value_string matter_cmd_0453_vals[] = {
     { 0x00, "AddNetwork" },
     { 0x01, "RemoveNetwork" },
     { 0x02, "GetOperationalDataset" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0453_vals[] = {
+    { 0x03, "OperationalDatasetResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0453_vals[] = {
@@ -1746,6 +1863,11 @@ static const value_string matter_cmd_0504_vals[] = {
     { 0x07, "CancelRecordProgram" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0504_vals[] = {
+    { 0x01, "ChangeChannelResponse" },
+    { 0x05, "ProgramGuideResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0504_vals[] = {
     { 0x0000, "ChannelList" },
     { 0x0001, "Lineup" },
@@ -1754,6 +1876,10 @@ static const value_string matter_attr_0504_vals[] = {
 };
 static const value_string matter_cmd_0505_vals[] = {
     { 0x00, "NavigateTarget" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0505_vals[] = {
+    { 0x01, "NavigateTargetResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0505_vals[] = {
@@ -1776,6 +1902,10 @@ static const value_string matter_cmd_0506_vals[] = {
     { 0x0C, "ActivateAudioTrack" },
     { 0x0D, "ActivateTextTrack" },
     { 0x0E, "DeactivateTextTrack" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0506_vals[] = {
+    { 0x0A, "PlaybackResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0506_vals[] = {
@@ -1812,9 +1942,17 @@ static const value_string matter_cmd_0509_vals[] = {
     { 0x00, "SendKey" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0509_vals[] = {
+    { 0x01, "SendKeyResponse" },
+    { 0, NULL }
+};
 static const value_string matter_cmd_050a_vals[] = {
     { 0x00, "LaunchContent" },
     { 0x01, "LaunchURL" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_050a_vals[] = {
+    { 0x02, "LauncherResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_050a_vals[] = {
@@ -1836,6 +1974,10 @@ static const value_string matter_cmd_050c_vals[] = {
     { 0x00, "LaunchApp" },
     { 0x01, "StopApp" },
     { 0x02, "HideApp" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_050c_vals[] = {
+    { 0x03, "LauncherResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_050c_vals[] = {
@@ -1860,6 +2002,10 @@ static const value_string matter_cmd_050e_vals[] = {
     { 0x03, "Logout" },
     { 0, NULL }
 };
+static const value_string matter_rsp_050e_vals[] = {
+    { 0x01, "GetSetupPINResponse" },
+    { 0, NULL }
+};
 static const value_string matter_cmd_050f_vals[] = {
     { 0x00, "UpdatePIN" },
     { 0x01, "ResetPIN" },
@@ -1877,6 +2023,10 @@ static const value_string matter_cmd_050f_vals[] = {
     { 0x0E, "RemoveBlockApplications" },
     { 0x0F, "SetBlockContentTimeWindow" },
     { 0x10, "RemoveBlockContentTimeWindow" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_050f_vals[] = {
+    { 0x02, "ResetPINResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_050f_vals[] = {
@@ -1897,12 +2047,20 @@ static const value_string matter_cmd_0510_vals[] = {
     { 0x00, "ContentAppMessage" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0510_vals[] = {
+    { 0x01, "ContentAppMessageResponse" },
+    { 0, NULL }
+};
 static const value_string matter_cmd_0550_vals[] = {
     { 0x00, "CreateTwoDCartesianZone" },
     { 0x02, "UpdateTwoDCartesianZone" },
     { 0x03, "RemoveZone" },
     { 0x04, "CreateOrUpdateTrigger" },
     { 0x05, "RemoveTrigger" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0550_vals[] = {
+    { 0x01, "CreateTwoDCartesianZoneResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0550_vals[] = {
@@ -1926,6 +2084,13 @@ static const value_string matter_cmd_0551_vals[] = {
     { 0x0A, "SnapshotStreamDeallocate" },
     { 0x0B, "SetStreamPriorities" },
     { 0x0C, "CaptureSnapshot" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0551_vals[] = {
+    { 0x01, "AudioStreamAllocateResponse" },
+    { 0x04, "VideoStreamAllocateResponse" },
+    { 0x08, "SnapshotStreamAllocateResponse" },
+    { 0x0D, "CaptureSnapshotResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0551_vals[] = {
@@ -2004,6 +2169,11 @@ static const value_string matter_cmd_0553_vals[] = {
     { 0x06, "EndSession" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0553_vals[] = {
+    { 0x01, "SolicitOfferResponse" },
+    { 0x03, "ProvideOfferResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0553_vals[] = {
     { 0x0000, "CurrentSessions" },
     { 0, NULL }
@@ -2028,6 +2198,11 @@ static const value_string matter_cmd_0555_vals[] = {
     { 0x06, "FindTransport" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0555_vals[] = {
+    { 0x01, "AllocatePushTransportResponse" },
+    { 0x07, "FindTransportResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0555_vals[] = {
     { 0x0000, "SupportedFormats" },
     { 0x0001, "CurrentConnections" },
@@ -2046,6 +2221,11 @@ static const value_string matter_attr_0556_vals[] = {
 static const value_string matter_cmd_0700_vals[] = {
     { 0x00, "GetTariffComponent" },
     { 0x01, "GetDayEntry" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0700_vals[] = {
+    { 0x00, "GetTariffComponentResponse" },
+    { 0x01, "GetDayEntryResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0700_vals[] = {
@@ -2078,6 +2258,10 @@ static const value_string matter_attr_0750_vals[] = {
 static const value_string matter_cmd_0751_vals[] = {
     { 0x00, "RequestCommissioningApproval" },
     { 0x01, "CommissionNode" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0751_vals[] = {
+    { 0x02, "ReverseOpenCommissioningWindow" },
     { 0, NULL }
 };
 static const value_string matter_attr_0751_vals[] = {
@@ -2133,6 +2317,12 @@ static const value_string matter_cmd_0753_vals[] = {
     { 0x08, "AnnounceJointFabricAdministrator" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0753_vals[] = {
+    { 0x01, "ICACCSRResponse" },
+    { 0x03, "ICACResponse" },
+    { 0x06, "TransferAnchorResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0753_vals[] = {
     { 0x0000, "AdministratorFabricIndex" },
     { 0, NULL }
@@ -2149,6 +2339,15 @@ static const value_string matter_cmd_0801_vals[] = {
     { 0x0E, "RemoveClientCertificate" },
     { 0, NULL }
 };
+static const value_string matter_rsp_0801_vals[] = {
+    { 0x01, "ProvisionRootCertificateResponse" },
+    { 0x03, "FindRootCertificateResponse" },
+    { 0x05, "LookupRootCertificateResponse" },
+    { 0x08, "ClientCSRResponse" },
+    { 0x0B, "FindClientCertificateResponse" },
+    { 0x0D, "LookupClientCertificateResponse" },
+    { 0, NULL }
+};
 static const value_string matter_attr_0801_vals[] = {
     { 0x0000, "MaxRootCertificates" },
     { 0x0001, "ProvisionedRootCertificates" },
@@ -2160,6 +2359,11 @@ static const value_string matter_cmd_0802_vals[] = {
     { 0x00, "ProvisionEndpoint" },
     { 0x02, "FindEndpoint" },
     { 0x04, "RemoveEndpoint" },
+    { 0, NULL }
+};
+static const value_string matter_rsp_0802_vals[] = {
+    { 0x01, "ProvisionEndpointResponse" },
+    { 0x03, "FindEndpointResponse" },
     { 0, NULL }
 };
 static const value_string matter_attr_0802_vals[] = {
@@ -2183,152 +2387,165 @@ static const value_string matter_attr_0b07_vals[] = {
     { 0, NULL }
 };
 
-typedef struct { uint32_t cluster_id; const value_string *cmds; const value_string *attrs; } matter_cluster_members_t;
+typedef struct { uint32_t cluster_id; const value_string *cmds; const value_string *rsps; const value_string *attrs; } matter_cluster_members_t;
 
 static const matter_cluster_members_t matter_cluster_members[] = {
-    { 0x0003, matter_cmd_0003_vals, matter_attr_0003_vals },
-    { 0x0004, matter_cmd_0004_vals, matter_attr_0004_vals },
-    { 0x0006, matter_cmd_0006_vals, matter_attr_0006_vals },
-    { 0x0008, matter_cmd_0008_vals, matter_attr_0008_vals },
-    { 0x001D, NULL, matter_attr_001d_vals },
-    { 0x001E, NULL, matter_attr_001e_vals },
-    { 0x001F, matter_cmd_001f_vals, matter_attr_001f_vals },
-    { 0x0025, matter_cmd_0025_vals, matter_attr_0025_vals },
-    { 0x0028, NULL, matter_attr_0028_vals },
-    { 0x0029, matter_cmd_0029_vals, NULL },
-    { 0x002A, matter_cmd_002a_vals, matter_attr_002a_vals },
-    { 0x002B, NULL, matter_attr_002b_vals },
-    { 0x002C, NULL, matter_attr_002c_vals },
-    { 0x002D, NULL, matter_attr_002d_vals },
-    { 0x002E, NULL, matter_attr_002e_vals },
-    { 0x002F, NULL, matter_attr_002f_vals },
-    { 0x0030, matter_cmd_0030_vals, matter_attr_0030_vals },
-    { 0x0031, matter_cmd_0031_vals, matter_attr_0031_vals },
-    { 0x0032, matter_cmd_0032_vals, NULL },
-    { 0x0033, matter_cmd_0033_vals, matter_attr_0033_vals },
-    { 0x0034, matter_cmd_0034_vals, matter_attr_0034_vals },
-    { 0x0035, matter_cmd_0035_vals, matter_attr_0035_vals },
-    { 0x0036, matter_cmd_0036_vals, matter_attr_0036_vals },
-    { 0x0037, matter_cmd_0037_vals, matter_attr_0037_vals },
-    { 0x0038, matter_cmd_0038_vals, matter_attr_0038_vals },
-    { 0x0039, matter_cmd_0039_vals, matter_attr_0039_vals },
-    { 0x003B, NULL, matter_attr_003b_vals },
-    { 0x003C, matter_cmd_003c_vals, matter_attr_003c_vals },
-    { 0x003E, matter_cmd_003e_vals, matter_attr_003e_vals },
-    { 0x003F, matter_cmd_003f_vals, matter_attr_003f_vals },
-    { 0x0040, NULL, matter_attr_0040_vals },
-    { 0x0041, NULL, matter_attr_0041_vals },
-    { 0x0045, NULL, matter_attr_0045_vals },
-    { 0x0046, matter_cmd_0046_vals, matter_attr_0046_vals },
-    { 0x0049, NULL, matter_attr_0049_vals },
-    { 0x004A, NULL, matter_attr_004a_vals },
-    { 0x0050, matter_cmd_0050_vals, matter_attr_0050_vals },
-    { 0x0051, NULL, matter_attr_0051_vals },
-    { 0x0052, NULL, matter_attr_0052_vals },
-    { 0x0053, NULL, matter_attr_0053_vals },
-    { 0x0054, NULL, matter_attr_0054_vals },
-    { 0x0055, NULL, matter_attr_0055_vals },
-    { 0x0056, matter_cmd_0056_vals, matter_attr_0056_vals },
-    { 0x0059, NULL, matter_attr_0059_vals },
-    { 0x005B, NULL, matter_attr_005b_vals },
-    { 0x005C, matter_cmd_005c_vals, matter_attr_005c_vals },
-    { 0x005E, NULL, matter_attr_005e_vals },
-    { 0x005F, matter_cmd_005f_vals, matter_attr_005f_vals },
-    { 0x0060, matter_cmd_0060_vals, matter_attr_0060_vals },
-    { 0x0061, matter_cmd_0061_vals, NULL },
-    { 0x0062, matter_cmd_0062_vals, matter_attr_0062_vals },
-    { 0x0064, matter_cmd_0064_vals, matter_attr_0064_vals },
-    { 0x0065, matter_cmd_0065_vals, matter_attr_0065_vals },
-    { 0x0071, matter_cmd_0071_vals, matter_attr_0071_vals },
-    { 0x0072, matter_cmd_0072_vals, matter_attr_0072_vals },
-    { 0x0079, matter_cmd_0079_vals, matter_attr_0079_vals },
-    { 0x0080, matter_cmd_0080_vals, matter_attr_0080_vals },
-    { 0x0081, matter_cmd_0081_vals, matter_attr_0081_vals },
-    { 0x0090, NULL, matter_attr_0090_vals },
-    { 0x0091, NULL, matter_attr_0091_vals },
-    { 0x0094, matter_cmd_0094_vals, matter_attr_0094_vals },
-    { 0x0095, matter_cmd_0095_vals, matter_attr_0095_vals },
-    { 0x0097, matter_cmd_0097_vals, matter_attr_0097_vals },
-    { 0x0098, matter_cmd_0098_vals, matter_attr_0098_vals },
-    { 0x0099, matter_cmd_0099_vals, matter_attr_0099_vals },
-    { 0x009B, NULL, matter_attr_009b_vals },
-    { 0x009C, NULL, matter_attr_009c_vals },
-    { 0x009D, NULL, matter_attr_009d_vals },
-    { 0x009E, NULL, matter_attr_009e_vals },
-    { 0x009F, NULL, matter_attr_009f_vals },
-    { 0x00A0, NULL, matter_attr_00a0_vals },
-    { 0x0101, matter_cmd_0101_vals, matter_attr_0101_vals },
-    { 0x0102, matter_cmd_0102_vals, matter_attr_0102_vals },
-    { 0x0104, matter_cmd_0104_vals, matter_attr_0104_vals },
-    { 0x0105, matter_cmd_0105_vals, matter_attr_0105_vals },
-    { 0x0150, matter_cmd_0150_vals, matter_attr_0150_vals },
-    { 0x0200, NULL, matter_attr_0200_vals },
-    { 0x0201, matter_cmd_0201_vals, matter_attr_0201_vals },
-    { 0x0202, matter_cmd_0202_vals, matter_attr_0202_vals },
-    { 0x0204, NULL, matter_attr_0204_vals },
-    { 0x0300, matter_cmd_0300_vals, matter_attr_0300_vals },
-    { 0x0400, NULL, matter_attr_0400_vals },
-    { 0x0402, NULL, matter_attr_0402_vals },
-    { 0x0403, NULL, matter_attr_0403_vals },
-    { 0x0404, NULL, matter_attr_0404_vals },
-    { 0x0405, NULL, matter_attr_0405_vals },
-    { 0x0406, NULL, matter_attr_0406_vals },
-    { 0x040C, NULL, matter_attr_040c_vals },
-    { 0x040D, NULL, matter_attr_040d_vals },
-    { 0x0413, NULL, matter_attr_0413_vals },
-    { 0x0415, NULL, matter_attr_0415_vals },
-    { 0x042A, NULL, matter_attr_042a_vals },
-    { 0x042B, NULL, matter_attr_042b_vals },
-    { 0x042C, NULL, matter_attr_042c_vals },
-    { 0x042D, NULL, matter_attr_042d_vals },
-    { 0x042E, NULL, matter_attr_042e_vals },
-    { 0x042F, NULL, matter_attr_042f_vals },
-    { 0x0430, NULL, matter_attr_0430_vals },
-    { 0x0431, NULL, matter_attr_0431_vals },
-    { 0x0451, matter_cmd_0451_vals, matter_attr_0451_vals },
-    { 0x0452, matter_cmd_0452_vals, matter_attr_0452_vals },
-    { 0x0453, matter_cmd_0453_vals, matter_attr_0453_vals },
-    { 0x0503, NULL, matter_attr_0503_vals },
-    { 0x0504, matter_cmd_0504_vals, matter_attr_0504_vals },
-    { 0x0505, matter_cmd_0505_vals, matter_attr_0505_vals },
-    { 0x0506, matter_cmd_0506_vals, matter_attr_0506_vals },
-    { 0x0507, matter_cmd_0507_vals, matter_attr_0507_vals },
-    { 0x0508, matter_cmd_0508_vals, NULL },
-    { 0x0509, matter_cmd_0509_vals, NULL },
-    { 0x050A, matter_cmd_050a_vals, matter_attr_050a_vals },
-    { 0x050B, matter_cmd_050b_vals, matter_attr_050b_vals },
-    { 0x050C, matter_cmd_050c_vals, matter_attr_050c_vals },
-    { 0x050D, NULL, matter_attr_050d_vals },
-    { 0x050E, matter_cmd_050e_vals, NULL },
-    { 0x050F, matter_cmd_050f_vals, matter_attr_050f_vals },
-    { 0x0510, matter_cmd_0510_vals, NULL },
-    { 0x0550, matter_cmd_0550_vals, matter_attr_0550_vals },
-    { 0x0551, matter_cmd_0551_vals, matter_attr_0551_vals },
-    { 0x0552, matter_cmd_0552_vals, matter_attr_0552_vals },
-    { 0x0553, matter_cmd_0553_vals, matter_attr_0553_vals },
-    { 0x0554, matter_cmd_0554_vals, matter_attr_0554_vals },
-    { 0x0555, matter_cmd_0555_vals, matter_attr_0555_vals },
-    { 0x0556, matter_cmd_0556_vals, matter_attr_0556_vals },
-    { 0x0700, matter_cmd_0700_vals, matter_attr_0700_vals },
-    { 0x0750, NULL, matter_attr_0750_vals },
-    { 0x0751, matter_cmd_0751_vals, matter_attr_0751_vals },
-    { 0x0752, matter_cmd_0752_vals, matter_attr_0752_vals },
-    { 0x0753, matter_cmd_0753_vals, matter_attr_0753_vals },
-    { 0x0801, matter_cmd_0801_vals, matter_attr_0801_vals },
-    { 0x0802, matter_cmd_0802_vals, matter_attr_0802_vals },
-    { 0x0B06, NULL, matter_attr_0b06_vals },
-    { 0x0B07, NULL, matter_attr_0b07_vals },
+    { 0x0003, matter_cmd_0003_vals, NULL, matter_attr_0003_vals },
+    { 0x0004, matter_cmd_0004_vals, matter_rsp_0004_vals, matter_attr_0004_vals },
+    { 0x0006, matter_cmd_0006_vals, NULL, matter_attr_0006_vals },
+    { 0x0008, matter_cmd_0008_vals, NULL, matter_attr_0008_vals },
+    { 0x001D, NULL, NULL, matter_attr_001d_vals },
+    { 0x001E, NULL, NULL, matter_attr_001e_vals },
+    { 0x001F, matter_cmd_001f_vals, matter_rsp_001f_vals, matter_attr_001f_vals },
+    { 0x0025, matter_cmd_0025_vals, NULL, matter_attr_0025_vals },
+    { 0x0028, NULL, NULL, matter_attr_0028_vals },
+    { 0x0029, matter_cmd_0029_vals, matter_rsp_0029_vals, NULL },
+    { 0x002A, matter_cmd_002a_vals, NULL, matter_attr_002a_vals },
+    { 0x002B, NULL, NULL, matter_attr_002b_vals },
+    { 0x002C, NULL, NULL, matter_attr_002c_vals },
+    { 0x002D, NULL, NULL, matter_attr_002d_vals },
+    { 0x002E, NULL, NULL, matter_attr_002e_vals },
+    { 0x002F, NULL, NULL, matter_attr_002f_vals },
+    { 0x0030, matter_cmd_0030_vals, matter_rsp_0030_vals, matter_attr_0030_vals },
+    { 0x0031, matter_cmd_0031_vals, matter_rsp_0031_vals, matter_attr_0031_vals },
+    { 0x0032, matter_cmd_0032_vals, matter_rsp_0032_vals, NULL },
+    { 0x0033, matter_cmd_0033_vals, matter_rsp_0033_vals, matter_attr_0033_vals },
+    { 0x0034, matter_cmd_0034_vals, NULL, matter_attr_0034_vals },
+    { 0x0035, matter_cmd_0035_vals, NULL, matter_attr_0035_vals },
+    { 0x0036, matter_cmd_0036_vals, NULL, matter_attr_0036_vals },
+    { 0x0037, matter_cmd_0037_vals, NULL, matter_attr_0037_vals },
+    { 0x0038, matter_cmd_0038_vals, matter_rsp_0038_vals, matter_attr_0038_vals },
+    { 0x0039, matter_cmd_0039_vals, NULL, matter_attr_0039_vals },
+    { 0x003B, NULL, NULL, matter_attr_003b_vals },
+    { 0x003C, matter_cmd_003c_vals, NULL, matter_attr_003c_vals },
+    { 0x003E, matter_cmd_003e_vals, matter_rsp_003e_vals, matter_attr_003e_vals },
+    { 0x003F, matter_cmd_003f_vals, matter_rsp_003f_vals, matter_attr_003f_vals },
+    { 0x0040, NULL, NULL, matter_attr_0040_vals },
+    { 0x0041, NULL, NULL, matter_attr_0041_vals },
+    { 0x0045, NULL, NULL, matter_attr_0045_vals },
+    { 0x0046, matter_cmd_0046_vals, matter_rsp_0046_vals, matter_attr_0046_vals },
+    { 0x0049, NULL, NULL, matter_attr_0049_vals },
+    { 0x004A, NULL, NULL, matter_attr_004a_vals },
+    { 0x0050, matter_cmd_0050_vals, NULL, matter_attr_0050_vals },
+    { 0x0051, NULL, NULL, matter_attr_0051_vals },
+    { 0x0052, NULL, NULL, matter_attr_0052_vals },
+    { 0x0053, NULL, NULL, matter_attr_0053_vals },
+    { 0x0054, NULL, NULL, matter_attr_0054_vals },
+    { 0x0055, NULL, NULL, matter_attr_0055_vals },
+    { 0x0056, matter_cmd_0056_vals, NULL, matter_attr_0056_vals },
+    { 0x0059, NULL, NULL, matter_attr_0059_vals },
+    { 0x005B, NULL, NULL, matter_attr_005b_vals },
+    { 0x005C, matter_cmd_005c_vals, NULL, matter_attr_005c_vals },
+    { 0x005E, NULL, NULL, matter_attr_005e_vals },
+    { 0x005F, matter_cmd_005f_vals, NULL, matter_attr_005f_vals },
+    { 0x0060, matter_cmd_0060_vals, matter_rsp_0060_vals, matter_attr_0060_vals },
+    { 0x0061, matter_cmd_0061_vals, NULL, NULL },
+    { 0x0062, matter_cmd_0062_vals, matter_rsp_0062_vals, matter_attr_0062_vals },
+    { 0x0064, matter_cmd_0064_vals, NULL, matter_attr_0064_vals },
+    { 0x0065, matter_cmd_0065_vals, matter_rsp_0065_vals, matter_attr_0065_vals },
+    { 0x0071, matter_cmd_0071_vals, NULL, matter_attr_0071_vals },
+    { 0x0072, matter_cmd_0072_vals, NULL, matter_attr_0072_vals },
+    { 0x0079, matter_cmd_0079_vals, NULL, matter_attr_0079_vals },
+    { 0x0080, matter_cmd_0080_vals, NULL, matter_attr_0080_vals },
+    { 0x0081, matter_cmd_0081_vals, NULL, matter_attr_0081_vals },
+    { 0x0090, NULL, NULL, matter_attr_0090_vals },
+    { 0x0091, NULL, NULL, matter_attr_0091_vals },
+    { 0x0094, matter_cmd_0094_vals, NULL, matter_attr_0094_vals },
+    { 0x0095, matter_cmd_0095_vals, matter_rsp_0095_vals, matter_attr_0095_vals },
+    { 0x0097, matter_cmd_0097_vals, NULL, matter_attr_0097_vals },
+    { 0x0098, matter_cmd_0098_vals, NULL, matter_attr_0098_vals },
+    { 0x0099, matter_cmd_0099_vals, matter_rsp_0099_vals, matter_attr_0099_vals },
+    { 0x009B, NULL, NULL, matter_attr_009b_vals },
+    { 0x009C, NULL, NULL, matter_attr_009c_vals },
+    { 0x009D, NULL, NULL, matter_attr_009d_vals },
+    { 0x009E, NULL, NULL, matter_attr_009e_vals },
+    { 0x009F, NULL, NULL, matter_attr_009f_vals },
+    { 0x00A0, NULL, NULL, matter_attr_00a0_vals },
+    { 0x0101, matter_cmd_0101_vals, matter_rsp_0101_vals, matter_attr_0101_vals },
+    { 0x0102, matter_cmd_0102_vals, NULL, matter_attr_0102_vals },
+    { 0x0104, matter_cmd_0104_vals, NULL, matter_attr_0104_vals },
+    { 0x0105, matter_cmd_0105_vals, NULL, matter_attr_0105_vals },
+    { 0x0150, matter_cmd_0150_vals, matter_rsp_0150_vals, matter_attr_0150_vals },
+    { 0x0200, NULL, NULL, matter_attr_0200_vals },
+    { 0x0201, matter_cmd_0201_vals, matter_rsp_0201_vals, matter_attr_0201_vals },
+    { 0x0202, matter_cmd_0202_vals, NULL, matter_attr_0202_vals },
+    { 0x0204, NULL, NULL, matter_attr_0204_vals },
+    { 0x0300, matter_cmd_0300_vals, NULL, matter_attr_0300_vals },
+    { 0x0400, NULL, NULL, matter_attr_0400_vals },
+    { 0x0402, NULL, NULL, matter_attr_0402_vals },
+    { 0x0403, NULL, NULL, matter_attr_0403_vals },
+    { 0x0404, NULL, NULL, matter_attr_0404_vals },
+    { 0x0405, NULL, NULL, matter_attr_0405_vals },
+    { 0x0406, NULL, NULL, matter_attr_0406_vals },
+    { 0x040C, NULL, NULL, matter_attr_040c_vals },
+    { 0x040D, NULL, NULL, matter_attr_040d_vals },
+    { 0x0413, NULL, NULL, matter_attr_0413_vals },
+    { 0x0415, NULL, NULL, matter_attr_0415_vals },
+    { 0x042A, NULL, NULL, matter_attr_042a_vals },
+    { 0x042B, NULL, NULL, matter_attr_042b_vals },
+    { 0x042C, NULL, NULL, matter_attr_042c_vals },
+    { 0x042D, NULL, NULL, matter_attr_042d_vals },
+    { 0x042E, NULL, NULL, matter_attr_042e_vals },
+    { 0x042F, NULL, NULL, matter_attr_042f_vals },
+    { 0x0430, NULL, NULL, matter_attr_0430_vals },
+    { 0x0431, NULL, NULL, matter_attr_0431_vals },
+    { 0x0451, matter_cmd_0451_vals, matter_rsp_0451_vals, matter_attr_0451_vals },
+    { 0x0452, matter_cmd_0452_vals, matter_rsp_0452_vals, matter_attr_0452_vals },
+    { 0x0453, matter_cmd_0453_vals, matter_rsp_0453_vals, matter_attr_0453_vals },
+    { 0x0503, NULL, NULL, matter_attr_0503_vals },
+    { 0x0504, matter_cmd_0504_vals, matter_rsp_0504_vals, matter_attr_0504_vals },
+    { 0x0505, matter_cmd_0505_vals, matter_rsp_0505_vals, matter_attr_0505_vals },
+    { 0x0506, matter_cmd_0506_vals, matter_rsp_0506_vals, matter_attr_0506_vals },
+    { 0x0507, matter_cmd_0507_vals, NULL, matter_attr_0507_vals },
+    { 0x0508, matter_cmd_0508_vals, NULL, NULL },
+    { 0x0509, matter_cmd_0509_vals, matter_rsp_0509_vals, NULL },
+    { 0x050A, matter_cmd_050a_vals, matter_rsp_050a_vals, matter_attr_050a_vals },
+    { 0x050B, matter_cmd_050b_vals, NULL, matter_attr_050b_vals },
+    { 0x050C, matter_cmd_050c_vals, matter_rsp_050c_vals, matter_attr_050c_vals },
+    { 0x050D, NULL, NULL, matter_attr_050d_vals },
+    { 0x050E, matter_cmd_050e_vals, matter_rsp_050e_vals, NULL },
+    { 0x050F, matter_cmd_050f_vals, matter_rsp_050f_vals, matter_attr_050f_vals },
+    { 0x0510, matter_cmd_0510_vals, matter_rsp_0510_vals, NULL },
+    { 0x0550, matter_cmd_0550_vals, matter_rsp_0550_vals, matter_attr_0550_vals },
+    { 0x0551, matter_cmd_0551_vals, matter_rsp_0551_vals, matter_attr_0551_vals },
+    { 0x0552, matter_cmd_0552_vals, NULL, matter_attr_0552_vals },
+    { 0x0553, matter_cmd_0553_vals, matter_rsp_0553_vals, matter_attr_0553_vals },
+    { 0x0554, matter_cmd_0554_vals, NULL, matter_attr_0554_vals },
+    { 0x0555, matter_cmd_0555_vals, matter_rsp_0555_vals, matter_attr_0555_vals },
+    { 0x0556, matter_cmd_0556_vals, NULL, matter_attr_0556_vals },
+    { 0x0700, matter_cmd_0700_vals, matter_rsp_0700_vals, matter_attr_0700_vals },
+    { 0x0750, NULL, NULL, matter_attr_0750_vals },
+    { 0x0751, matter_cmd_0751_vals, matter_rsp_0751_vals, matter_attr_0751_vals },
+    { 0x0752, matter_cmd_0752_vals, NULL, matter_attr_0752_vals },
+    { 0x0753, matter_cmd_0753_vals, matter_rsp_0753_vals, matter_attr_0753_vals },
+    { 0x0801, matter_cmd_0801_vals, matter_rsp_0801_vals, matter_attr_0801_vals },
+    { 0x0802, matter_cmd_0802_vals, matter_rsp_0802_vals, matter_attr_0802_vals },
+    { 0x0B06, NULL, NULL, matter_attr_0b06_vals },
+    { 0x0B07, NULL, NULL, matter_attr_0b07_vals },
 };
 
-const char *
-matter_cluster_member_name(uint32_t cluster_id, bool is_command, uint32_t id)
+static const matter_cluster_members_t *
+matter_cluster_lookup(uint32_t cluster_id)
 {
-    for (unsigned i = 0; i < array_length(matter_cluster_members); i++) {
-        if (matter_cluster_members[i].cluster_id == cluster_id) {
-            const value_string *vs = is_command ? matter_cluster_members[i].cmds
-                                                 : matter_cluster_members[i].attrs;
-            return vs ? try_val_to_str(id, vs) : NULL;
-        }
-    }
+    for (unsigned i = 0; i < array_length(matter_cluster_members); i++)
+        if (matter_cluster_members[i].cluster_id == cluster_id)
+            return &matter_cluster_members[i];
     return NULL;
+}
+
+const char *
+matter_cluster_attribute_name(uint32_t cluster_id, uint32_t id)
+{
+    const matter_cluster_members_t *m = matter_cluster_lookup(cluster_id);
+    return (m && m->attrs) ? try_val_to_str(id, m->attrs) : NULL;
+}
+
+const char *
+matter_cluster_command_name(uint32_t cluster_id, uint32_t id, bool is_response)
+{
+    const matter_cluster_members_t *m = matter_cluster_lookup(cluster_id);
+    if (!m)
+        return NULL;
+    const value_string *vs = is_response ? m->rsps : m->cmds;
+    return vs ? try_val_to_str(id, vs) : NULL;
 }

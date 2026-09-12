@@ -5,5 +5,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 extern const value_string matter_cluster_id_vals[];
-const char *matter_cluster_member_name(uint32_t cluster_id, bool is_command, uint32_t id);
+const char *matter_cluster_attribute_name(uint32_t cluster_id, uint32_t id);
+const char *matter_cluster_command_name(uint32_t cluster_id, uint32_t id, bool is_response);
 #endif
