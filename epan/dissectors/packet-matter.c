@@ -404,8 +404,9 @@ matter_build_nonce(uint8_t security_flags, uint32_t message_counter,
  */
 static tvbuff_t *
 matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
-                       uint32_t header_len, uint32_t payload_len,
-                       const uint8_t *key, const uint8_t *nonce)
+                       uint32_t payload_off, uint32_t payload_len,
+                       const uint8_t *key, const uint8_t *nonce,
+                       const uint8_t *aad, unsigned aad_len)
 {
     gcry_cipher_hd_t cipher_hd;
     gcry_error_t gcrypt_err;
@@ -429,7 +430,7 @@ matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
 
     /* CCM lengths: [0]=payload, [1]=AAD, [2]=tag(MIC) */
     ccm_lengths[0] = payload_len;
-    ccm_lengths[1] = header_len;
+    ccm_lengths[1] = aad_len;
     ccm_lengths[2] = MATTER_MIC_LEN;
 
     gcrypt_err = gcry_cipher_ctl(cipher_hd, GCRYCTL_SET_CCM_LENGTHS, ccm_lengths, sizeof(ccm_lengths));
@@ -439,8 +440,7 @@ matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
     }
 
     /* Authenticate the message header (AAD) */
-    gcrypt_err = gcry_cipher_authenticate(cipher_hd,
-        tvb_get_ptr(tvb, 0, header_len), header_len);
+    gcrypt_err = gcry_cipher_authenticate(cipher_hd, aad, aad_len);
     if (gcrypt_err != 0) {
         gcry_cipher_close(cipher_hd);
         return NULL;
@@ -449,7 +449,7 @@ matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
     /* Decrypt the payload */
     uint8_t *decrypted = (uint8_t *)wmem_alloc(pinfo->pool, payload_len);
     gcrypt_err = gcry_cipher_decrypt(cipher_hd, decrypted, payload_len,
-        tvb_get_ptr(tvb, header_len, payload_len), payload_len);
+        tvb_get_ptr(tvb, payload_off, payload_len), payload_len);
     if (gcrypt_err != 0) {
         gcry_cipher_close(cipher_hd);
         return NULL;
@@ -464,7 +464,7 @@ matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
         return NULL;
     }
 
-    const uint8_t *expected_mic = tvb_get_ptr(tvb, header_len + payload_len, MATTER_MIC_LEN);
+    const uint8_t *expected_mic = tvb_get_ptr(tvb, payload_off + payload_len, MATTER_MIC_LEN);
     if (memcmp(tag, expected_mic, MATTER_MIC_LEN) != 0) {
         /* MIC mismatch - wrong key or corrupted message */
         return NULL;
@@ -484,7 +484,86 @@ matter_try_session_key(tvbuff_t *tvb, packet_info *pinfo, uint32_t offset, uint3
     uint8_t nonce[MATTER_NONCE_LEN];
     matter_build_nonce(security_flags, message_counter,
                        sk->has_node_id ? sk->node_id : source_node_id, nonce);
-    return matter_decrypt_payload(tvb, pinfo, offset, payload_length, sk->key, nonce);
+    return matter_decrypt_payload(tvb, pinfo, offset, payload_length, sk->key, nonce,
+                                  tvb_get_ptr(tvb, 0, offset), offset);
+}
+
+/*
+ * Matter privacy obfuscation (Section 4.8.2) is AES-CCM keystream with the
+ * tag discarded, so decrypting is the same operation as encrypting: running
+ * the obfuscated bytes back through CCM yields the plaintext. Returns false
+ * on any libgcrypt error.
+ */
+static bool
+matter_privacy_deobfuscate(const uint8_t *privacy_key, const uint8_t *nonce,
+                           const uint8_t *in, unsigned len, uint8_t *out)
+{
+    gcry_cipher_hd_t hd;
+    uint64_t ccm_lengths[3] = { len, 0, MATTER_MIC_LEN };
+    bool ok = false;
+
+    if (gcry_cipher_open(&hd, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_CCM, 0))
+        return false;
+    if (gcry_cipher_setkey(hd, privacy_key, MATTER_SESSION_KEY_LEN) == 0 &&
+        gcry_cipher_setiv(hd, nonce, MATTER_NONCE_LEN) == 0 &&
+        gcry_cipher_ctl(hd, GCRYCTL_SET_CCM_LENGTHS, ccm_lengths, sizeof(ccm_lengths)) == 0 &&
+        gcry_cipher_encrypt(hd, out, len, in, len) == 0) {
+        ok = true;
+    }
+    gcry_cipher_close(hd);
+    return ok;
+}
+
+/*
+ * Attempt to decrypt a privacy-obfuscated group message with one candidate
+ * operational/privacy key pair. On success returns the decrypted payload
+ * tvb, writes the recovered message counter and source node ID, and fills
+ * deobf_header (privacy_len bytes) with the deobfuscated header region.
+ *
+ * The privacy nonce is sessionId (2, big-endian) || MIC[5..16] (Section
+ * 4.8.2), and the AEAD additional data is the *decrypted* message header.
+ */
+static tvbuff_t *
+matter_try_group_privacy(tvbuff_t *tvb, packet_info *pinfo, uint32_t privacy_off,
+                         uint32_t privacy_len, uint32_t payload_off, uint32_t payload_len,
+                         uint32_t session_id, uint8_t message_flags,
+                         const uint8_t *op_key, const uint8_t *privacy_key,
+                         uint8_t *deobf_header, uint32_t *out_counter, uint64_t *out_source)
+{
+    const uint8_t *mic = tvb_get_ptr(tvb, payload_off + payload_len, MATTER_MIC_LEN);
+    uint8_t priv_nonce[MATTER_NONCE_LEN];
+    priv_nonce[0] = (uint8_t)(session_id >> 8);   /* session ID, big-endian */
+    priv_nonce[1] = (uint8_t)(session_id);
+    memcpy(&priv_nonce[2], mic + 5, MATTER_NONCE_LEN - 2);
+
+    if (!matter_privacy_deobfuscate(privacy_key, priv_nonce,
+                                    tvb_get_ptr(tvb, privacy_off, privacy_len), privacy_len, deobf_header))
+        return NULL;
+
+    uint32_t counter = deobf_header[0] | (deobf_header[1] << 8) |
+                       (deobf_header[2] << 16) | ((uint32_t)deobf_header[3] << 24);
+    uint64_t source = 0;
+    if (message_flags & 0x04) {   /* MESSAGE_FLAG_HAS_SOURCE */
+        for (unsigned i = 0; i < 8; i++)
+            source |= (uint64_t)deobf_header[4 + i] << (8 * i);
+    }
+
+    /* AAD is the full decrypted header: the cleartext fixed part (up to the
+     * privacy region) followed by the deobfuscated region. */
+    uint8_t *aad = (uint8_t *)wmem_alloc(pinfo->pool, payload_off);
+    tvb_memcpy(tvb, aad, 0, privacy_off);
+    memcpy(aad + privacy_off, deobf_header, privacy_len);
+
+    uint8_t nonce[MATTER_NONCE_LEN];
+    matter_build_nonce(tvb_get_uint8(tvb, 3), counter, source, nonce);
+
+    tvbuff_t *dec = matter_decrypt_payload(tvb, pinfo, payload_off, payload_len, op_key, nonce,
+                                           aad, payload_off);
+    if (dec) {
+        *out_counter = counter;
+        *out_source = source;
+    }
+    return dec;
 }
 
 // Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
@@ -1344,6 +1423,8 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     uint32_t session_id = 0;
     uint32_t message_counter = 0;
     uint64_t source_node_id = 0;
+    tvbuff_t *privacy_payload_tvb = NULL;  /* set when a privacy header was decrypted */
+    unsigned  privacy_num_keys = 0;
 
     /* Check that the packet is long enough for it to belong to us. */
     if (tvb_reported_length(tvb) < MATTER_MIN_LENGTH)
@@ -1397,11 +1478,12 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     else if (message_session_type == SECURITY_FLAG_SESSION_TYPE_GROUP)
         col_add_fstr(pinfo->cinfo, COL_INFO, "Group Session [0x%04x]", session_id);
 
-    // decryption of message privacy is not yet supported,
-    // but add an opaque field with the encrypted blob
-    // Section 4.8.3
+    // Section 4.8.3: with the privacy flag set, the counter, source and
+    // destination fields are obfuscated. For a group session we can undo
+    // this with the derived privacy key and then dissect the header.
     if (security_flags & SECURITY_FLAG_HAS_PRIVACY) {
 
+        uint32_t privacy_off = offset;
         uint32_t privacy_header_length = 4;
         if (message_flags & MESSAGE_FLAG_HAS_SOURCE) {
             privacy_header_length += 8;
@@ -1411,7 +1493,54 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         } else if (message_dsiz == MESSAGE_FLAG_HAS_DEST_GROUP) {
             privacy_header_length += 2;
         }
-        proto_tree_add_bytes_format(matter_tree, hf_message_privacy_header, tvb, offset, privacy_header_length, NULL, "Encrypted Headers");
+
+        uint32_t payload_off = privacy_off + privacy_header_length;
+        tvb_ensure_bytes_exist(tvb, payload_off, MATTER_MIC_LEN);
+        uint32_t payload_len = tvb_reported_length_remaining(tvb, payload_off) - MATTER_MIC_LEN;
+
+        uint8_t deobf[20];  /* max privacy header = 4 + 8 (source) + 8 (dest) */
+        tvbuff_t *dec = NULL;
+
+        if (message_session_type == SECURITY_FLAG_SESSION_TYPE_GROUP) {
+            for (unsigned i = 0; i < num_matter_group_key_uat_records && !dec; i++) {
+                const matter_group_key_uat_record_t *rec = &matter_group_key_uat_records[i];
+                if (rec->group_session_id != session_id)
+                    continue;
+                privacy_num_keys++;
+                dec = matter_try_group_privacy(tvb, pinfo, privacy_off, privacy_header_length,
+                                               payload_off, payload_len, session_id, message_flags,
+                                               rec->operational_key, rec->privacy_key,
+                                               deobf, &message_counter, &source_node_id);
+            }
+        }
+
+        if (dec) {
+            /* Dissect the deobfuscated header from a decrypted data source. */
+            uint8_t *full = (uint8_t *)wmem_alloc(pinfo->pool, payload_off);
+            tvb_memcpy(tvb, full, 0, privacy_off);
+            memcpy(full + privacy_off, deobf, privacy_header_length);
+            tvbuff_t *htvb = tvb_new_child_real_data(tvb, full, payload_off, payload_off);
+            add_new_data_source(pinfo, htvb, "Decrypted Matter Headers");
+
+            proto_tree_add_item(matter_tree, hf_message_counter, htvb, privacy_off, 4, ENC_LITTLE_ENDIAN);
+            col_append_fstr(pinfo->cinfo, COL_INFO, ": Counter=%u", message_counter);
+            uint32_t ho = privacy_off + 4;
+            if (message_flags & MESSAGE_FLAG_HAS_SOURCE) {
+                proto_tree_add_item(matter_tree, hf_message_src_id, htvb, ho, 8, ENC_LITTLE_ENDIAN);
+                col_append_fstr(pinfo->cinfo, COL_INFO, " Src=0x%016" PRIx64, source_node_id);
+                ho += 8;
+            }
+            if (message_dsiz == MESSAGE_FLAG_HAS_DEST_NODE) {
+                proto_tree_add_item(matter_tree, hf_message_dest_node_id, htvb, ho, 8, ENC_LITTLE_ENDIAN);
+            } else if (message_dsiz == MESSAGE_FLAG_HAS_DEST_GROUP) {
+                uint32_t group_id;
+                proto_tree_add_item_ret_uint(matter_tree, hf_message_dest_group_id, htvb, ho, 2, ENC_LITTLE_ENDIAN, &group_id);
+                col_append_fstr(pinfo->cinfo, COL_INFO, " Group=0x%04x", group_id);
+            }
+            privacy_payload_tvb = dec;
+        } else {
+            proto_tree_add_bytes_format(matter_tree, hf_message_privacy_header, tvb, offset, privacy_header_length, NULL, "Encrypted Headers");
+        }
         offset += privacy_header_length;
 
     } else {
@@ -1460,6 +1589,26 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         tvbuff_t *next_tvb = tvb_new_subset_remaining(tvb, offset);
 
         offset += dissect_matter_payload(next_tvb, pinfo, payload_tree);
+    } else if (security_flags & SECURITY_FLAG_HAS_PRIVACY) {
+        // Privacy messages were decrypted (or not) together with the header above.
+        uint32_t payload_length = tvb_reported_length_remaining(tvb, offset) - MATTER_MIC_LEN;
+        if (privacy_payload_tvb) {
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Decrypted Payload (%u bytes)", payload_length);
+            proto_tree *payload_tree = proto_item_add_subtree(payload_item, ett_payload);
+            dissect_matter_payload(privacy_payload_tvb, pinfo, payload_tree);
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+            col_append_str(pinfo->cinfo, COL_INFO, " [Decrypted]");
+        } else if (privacy_num_keys > 0) {
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [Decryption failed - %u key(s) tried]", payload_length, privacy_num_keys);
+            expert_add_info_format(pinfo, payload_item, &ei_matter_decryption_failed,
+                "Decryption failed: tried %u key(s), none passed MIC verification", privacy_num_keys);
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+        } else {
+            proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [No keys configured]", payload_length);
+            expert_add_info_format(pinfo, payload_item, &ei_matter_decryption_no_key,
+                "No decryption keys configured in Matter session keys table");
+            proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
+        }
     } else {
         // A secured message always ends with the MIC; anything shorter is truncated.
         tvb_ensure_bytes_exist(tvb, offset, MATTER_MIC_LEN);

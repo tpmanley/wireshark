@@ -1262,6 +1262,29 @@ class TestMatterGroupDecryption:
         assert result['matter.decryption.no_key'] != ''
         assert '[Decrypted]' not in result['_ws.col.Info']
 
+    def test_group_privacy_decrypt(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A privacy-obfuscated group message: header and payload are recovered."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP_PRIVACY,
+            ['matter.message.counter', 'matter.message.src_id',
+             'matter.tlv.value_uint', '_ws.col.Info'],
+            group_entries=[{'epoch_key': _GROUP_EPOCH_KEY, 'compressed_fabric_id': _GROUP_CFID}])
+        assert result['matter.message.counter'] == '9'
+        assert result['matter.message.src_id'] == '0x1122334455667788'
+        assert result['matter.tlv.value_uint'] == '42'
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_group_privacy_no_key_stays_opaque(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Without a key the obfuscated header is shown opaque, not misparsed."""
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP_PRIVACY,
+            ['matter.message.privacy_header', 'matter.message.counter', '_ws.col.Info'])
+        assert result['matter.message.privacy_header'] != ''
+        assert result['matter.message.counter'] == ''
+        assert '[Decrypted]' not in result['_ws.col.Info']
+
     def test_group_wrong_fabric(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """A key deriving to a different session ID is not even tried (no failure noise)."""
         result = _tshark_decrypt_fields(
