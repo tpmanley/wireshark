@@ -196,7 +196,10 @@ The following features are either new or have been significantly updated since v
   their field names from the Matter 1.6.1 specification, cluster IDs are
   resolved to names, and Secure Channel StatusReport messages are dissected. A
   heuristic dissector recognizes unsecured Matter messages on non-standard
-  UDP ports.
+  UDP ports. Group (multicast) sessions can be decrypted from a group
+  epoch key and compressed fabric ID entered in a group keys table, or
+  from epoch keys harvested out of decrypted commissioning traffic,
+  including privacy-obfuscated group message headers.
 
 === Removed Features and Support
 

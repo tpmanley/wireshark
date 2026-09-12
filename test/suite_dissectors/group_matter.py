@@ -1210,7 +1210,7 @@ def _tshark_decrypt_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
 
 
 def _tshark_decrypt_capture(cmd_tshark, cmd_text2pcap, test_env, result_file,
-                            packets, fields, uat_entries, two_pass=False):
+                            packets, fields, uat_entries, two_pass=False, group_entries=None):
     """Like _tshark_decrypt_fields but for several packets; returns one dict per packet."""
     text_file = result_file('matter_decrypt_multi.txt')
     pcap_file = result_file('matter_decrypt_multi.pcapng')
@@ -1234,6 +1234,9 @@ def _tshark_decrypt_capture(cmd_tshark, cmd_text2pcap, test_env, result_file,
             entry.get('initiator_node_id', ''), entry.get('responder_node_id', ''),
             entry.get('i2r_key', ''), entry.get('r2i_key', ''))
         args.extend(['-o', f'uat:matter_session_keys:{uat_row}'])
+    for entry in (group_entries or []):
+        row = '"{}","{}"'.format(entry['epoch_key'], entry['compressed_fabric_id'])
+        args.extend(['-o', f'uat:matter_group_keys:{row}'])
 
     result = subprocess.run(
         args, capture_output=True, check=True, encoding='utf-8', env=test_env,
@@ -1351,6 +1354,28 @@ class TestMatterGroupDecryption:
             ['matter.group_addr.fabric_id', 'matter.group_addr.group_id'])
         assert result['matter.group_addr.fabric_id'] == '0x2906c908d115d362'
         assert result['matter.group_addr.group_id'] == '0x0002'
+
+    def test_group_key_harvest(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Epoch key harvested from a KeySetWrite decrypts later group traffic
+        when only the compressed fabric ID is configured."""
+        # Frame 1: an (unsecured, so cleartext) IM InvokeRequest carrying
+        # GroupKeyManagement.KeySetWrite with EpochKey0 = the spec epoch key.
+        keysetwrite = bytes.fromhex(
+            '152800280136023500350024000025013f002402001835011525002a0024'
+            '0100300210235bf7e62823d358dca4ba50b1535f4b1818181824ff0118')
+        f1 = _make_matter_packet(proto_id=0x0001, opcode=0x08, tlv_bytes=keysetwrite)
+        # Frame 2: the group message (session id 0xB9F7), no group epoch key given.
+        rows = _tshark_decrypt_capture(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            [f1, _ENC_PKT_GROUP],
+            ['matter.message.session_id', 'matter.tlv.value_uint', '_ws.col.Info'],
+            uat_entries=[],
+            group_entries=[{'epoch_key': '00' * 16, 'compressed_fabric_id': _GROUP_CFID}])
+        # The configured group row has a dummy epoch key (derives to a
+        # different session ID), so only the *harvested* key can decrypt.
+        assert rows[1]['matter.message.session_id'] == f'0x{_GROUP_SESSION_ID:04x}'
+        assert rows[1]['matter.tlv.value_uint'] == '42'
+        assert '[Decrypted]' in rows[1]['_ws.col.Info']
 
     def test_group_wrong_fabric(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """A key deriving to a different session ID is not even tried (no failure noise)."""

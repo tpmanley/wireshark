@@ -314,6 +314,110 @@ typedef struct {
 static matter_group_key_uat_record_t *matter_group_key_uat_records;
 static unsigned                       num_matter_group_key_uat_records;
 
+/*
+ * Group keys derived from epoch keys harvested out of decrypted
+ * commissioning traffic (GroupKeyManagement.KeySetWrite, Groupcast
+ * JoinGroup/UpdateGroupKey, AddNOC IPK). Keyed by derived group session
+ * ID and reset per capture file, so that once the provisioning CASE
+ * session is decrypted, group traffic decrypts without further setup.
+ */
+typedef struct {
+    uint8_t operational_key[MATTER_SESSION_KEY_LEN];
+    uint8_t privacy_key[MATTER_SESSION_KEY_LEN];
+} matter_group_derived_t;
+
+static wmem_map_t *matter_harvested_group_keys;
+
+/*
+ * Walk one TLV container's elements starting at offset, collecting any
+ * 16-byte octet strings (candidate epoch keys). Returns the offset just
+ * past the container's End-of-Container marker. Bounded in recursion.
+ */
+#define MATTER_MAX_HARVEST_KEYS 12
+static unsigned
+matter_collect_octet16(tvbuff_t *tvb, unsigned offset, unsigned end, unsigned depth,
+                       uint8_t keys[][MATTER_SESSION_KEY_LEN], unsigned *nkeys)
+{
+    static const int elem_sizes[] = { 1, 2, 4, 8 };
+    if (depth > 8)
+        return end;
+    while (offset < end) {
+        uint8_t control = tvb_get_uint8(tvb, offset);
+        uint8_t tag_form = (control >> 5) & 0x07;
+        uint8_t elem = control & 0x1F;
+        offset += 1;
+        if (tag_form == 0 && elem == 0x18)   /* End of Container */
+            return offset;
+        switch (tag_form) {                  /* skip the tag octets */
+        case 0: break;
+        case 1: offset += 1; break;
+        case 2: case 4: offset += 2; break;
+        case 3: case 5: offset += 4; break;
+        case 6: offset += 6; break;
+        case 7: offset += 8; break;
+        default: return end;
+        }
+        if (elem <= 0x07) {                  /* signed / unsigned integer */
+            offset += elem_sizes[elem & 0x03];
+        } else if (elem == 0x08 || elem == 0x09 || elem == 0x14) {
+            /* boolean or null: no value */
+        } else if (elem == 0x0A) {
+            offset += 4;                     /* float */
+        } else if (elem == 0x0B) {
+            offset += 8;                     /* double */
+        } else if (elem >= 0x0C && elem <= 0x13) {  /* UTF-8 or octet string */
+            int lsz = elem_sizes[elem & 0x03];
+            uint64_t slen = 0;
+            for (int i = 0; i < lsz; i++)
+                slen |= (uint64_t)tvb_get_uint8(tvb, offset + i) << (8 * i);
+            offset += lsz;
+            if (elem >= 0x10 && slen == MATTER_SESSION_KEY_LEN &&
+                *nkeys < MATTER_MAX_HARVEST_KEYS &&
+                tvb_bytes_exist(tvb, offset, MATTER_SESSION_KEY_LEN)) {
+                tvb_memcpy(tvb, keys[*nkeys], offset, MATTER_SESSION_KEY_LEN);
+                (*nkeys)++;
+            }
+            offset += (unsigned)slen;
+        } else if (elem >= 0x15 && elem <= 0x17) {  /* structure / array / list */
+            offset = matter_collect_octet16(tvb, offset, end, depth + 1, keys, nkeys);
+        } else {
+            return end;
+        }
+    }
+    return offset;
+}
+
+/*
+ * Harvest epoch keys from a decrypted Interaction Model payload and, for
+ * every compressed fabric ID configured in the group-key table, derive and
+ * register the group keys keyed by their group session ID.
+ */
+static void
+matter_harvest_group_keys(tvbuff_t *tvb, packet_info *pinfo)
+{
+    if (num_matter_group_key_uat_records == 0 || pinfo->fd->visited)
+        return;
+
+    uint8_t keys[MATTER_MAX_HARVEST_KEYS][MATTER_SESSION_KEY_LEN];
+    unsigned nkeys = 0;
+    matter_collect_octet16(tvb, 0, tvb_reported_length(tvb), 0, keys, &nkeys);
+
+    for (unsigned k = 0; k < nkeys; k++) {
+        for (unsigned f = 0; f < num_matter_group_key_uat_records; f++) {
+            uint8_t op_key[MATTER_SESSION_KEY_LEN], priv_key[MATTER_SESSION_KEY_LEN];
+            uint16_t gsid;
+            matter_derive_group_keys(keys[k], matter_group_key_uat_records[f].compressed_fabric_id_bytes,
+                                     op_key, priv_key, &gsid);
+            if (wmem_map_lookup(matter_harvested_group_keys, GUINT_TO_POINTER(gsid)))
+                continue;
+            matter_group_derived_t *e = wmem_new(wmem_file_scope(), matter_group_derived_t);
+            memcpy(e->operational_key, op_key, MATTER_SESSION_KEY_LEN);
+            memcpy(e->privacy_key, priv_key, MATTER_SESSION_KEY_LEN);
+            wmem_map_insert(matter_harvested_group_keys, GUINT_TO_POINTER(gsid), e);
+        }
+    }
+}
+
 static void *
 matter_group_key_uat_copy_cb(void *dest, const void *source, size_t len _U_)
 {
@@ -1535,6 +1639,14 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
                                                rec->operational_key, rec->privacy_key,
                                                deobf, &message_counter, &source_node_id);
             }
+            const matter_group_derived_t *harv = wmem_map_lookup(matter_harvested_group_keys, GUINT_TO_POINTER(session_id));
+            if (harv && !dec) {
+                privacy_num_keys++;
+                dec = matter_try_group_privacy(tvb, pinfo, privacy_off, privacy_header_length,
+                                               payload_off, payload_len, session_id, message_flags,
+                                               harv->operational_key, harv->privacy_key,
+                                               deobf, &message_counter, &source_node_id);
+            }
         }
 
         if (dec) {
@@ -1669,6 +1781,15 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
                     continue;
                 num_keys++;
                 memcpy(winner.key, rec->operational_key, MATTER_SESSION_KEY_LEN);
+                winner.node_id = 0;
+                winner.has_node_id = false;
+                decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                       security_flags, message_counter, source_node_id, &winner);
+            }
+            const matter_group_derived_t *harv = wmem_map_lookup(matter_harvested_group_keys, GUINT_TO_POINTER(session_id));
+            if (harv && !decrypted_tvb) {
+                num_keys++;
+                memcpy(winner.key, harv->operational_key, MATTER_SESSION_KEY_LEN);
                 winner.node_id = 0;
                 winner.has_node_id = false;
                 decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
@@ -1818,6 +1939,12 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
             tvbuff_t *app_tvb = tvb_new_subset_length(tvb, offset, application_length);
             matter_tlv_context_id_t ctx = matter_payload_context(protocol_vendor_id, protocol_id, protocol_opcode);
             dissect_matter_tlv_internal(app_tvb, pinfo, app_tree, hf_matter_tlv_elem_tag, ctx);
+
+            /* Harvest group epoch keys from commissioning commands (e.g.
+             * GroupKeyManagement.KeySetWrite) so later group traffic can be
+             * decrypted with only the compressed fabric ID configured. */
+            if (protocol_vendor_id == 0 && protocol_id == 0x0001 && protocol_opcode == 0x08)
+                matter_harvest_group_keys(app_tvb, pinfo);
         }
         offset += application_length;
     }
@@ -2465,6 +2592,8 @@ proto_register_matter(void)
 
     matter_session_key_cache = wmem_map_new_autoreset(wmem_epan_scope(), wmem_file_scope(),
                                                       g_direct_hash, g_direct_equal);
+    matter_harvested_group_keys = wmem_map_new_autoreset(wmem_epan_scope(), wmem_file_scope(),
+                                                         g_direct_hash, g_direct_equal);
 
     module_t *matter_module = prefs_register_protocol(proto_matter, NULL);
     /* UAT for entering CASE session keys directly in preferences */
