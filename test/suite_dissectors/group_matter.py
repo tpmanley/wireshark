@@ -1176,8 +1176,61 @@ def _tshark_decrypt_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
     return dict(zip(fields, values))
 
 
+def _tshark_decrypt_capture(cmd_tshark, cmd_text2pcap, test_env, result_file,
+                            packets, fields, uat_entries, two_pass=False):
+    """Like _tshark_decrypt_fields but for several packets; returns one dict per packet."""
+    text_file = result_file('matter_decrypt_multi.txt')
+    pcap_file = result_file('matter_decrypt_multi.pcapng')
+
+    with open(text_file, 'w') as f:
+        for pkt in packets:
+            f.write("000000 " + " ".join(f"{b:02x}" for b in pkt) + "\n\n")
+
+    subprocess.check_call(
+        (cmd_text2pcap, '-u', '1234,5540', text_file, pcap_file),
+        env=test_env,
+    )
+
+    args = [cmd_tshark, '-r', pcap_file, '-T', 'fields']
+    if two_pass:
+        args.append('-2')
+    for field in fields:
+        args.extend(['-e', field])
+    for entry in uat_entries:
+        uat_row = '"{}","{}","{}","{}"'.format(
+            entry.get('initiator_node_id', ''), entry.get('responder_node_id', ''),
+            entry.get('i2r_key', ''), entry.get('r2i_key', ''))
+        args.extend(['-o', f'uat:matter_session_keys:{uat_row}'])
+
+    result = subprocess.run(
+        args, capture_output=True, check=True, encoding='utf-8', env=test_env,
+    )
+    rows = []
+    for line in result.stdout.rstrip('\r\n').split('\n'):
+        values = line.split('\t')
+        rows.append(dict(zip(fields, values)))
+    return rows
+
+
 class TestMatterDecryption:
     """Tests for CASE/PASE session decryption (MR4)."""
+
+    def test_decrypt_key_cached_per_session(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """Once a key has decrypted a session, later packets and other sessions still decrypt."""
+        # Two sessions (0x002A and 0x0064) interleaved; the wrong key is
+        # listed first so the search has to fall through to the right one.
+        uat = [{'i2r_key': 'ff' * 16}, {'r2i_key': _ENC_KEY_HEX}]
+        packets = [_ENC_PKT_BASIC, _ENC_PKT_SID100, _ENC_PKT_TLV, _ENC_PKT_SID100]
+        for two_pass in (False, True):
+            rows = _tshark_decrypt_capture(
+                cmd_tshark, cmd_text2pcap, test_env, result_file,
+                packets, ['matter.message.session_id', '_ws.col.Info', 'matter.decryption.failed'],
+                uat, two_pass=two_pass)
+            assert len(rows) == 4
+            assert [r['matter.message.session_id'] for r in rows] == ['0x002a', '0x0064', '0x002a', '0x0064']
+            for r in rows:
+                assert '[Decrypted]' in r['_ws.col.Info']
+                assert r['matter.decryption.failed'] == ''
 
     # ── UAT decryption ────────────────────────────────────────────────
 

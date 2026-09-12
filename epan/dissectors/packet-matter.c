@@ -260,6 +260,21 @@ hex_to_bytes(const char *hex, uint8_t *out, unsigned len)
 }
 
 /*
+ * A session key together with the source node ID to use in the nonce.
+ * The key that successfully decrypts a message is remembered per session
+ * ID for the rest of the capture, so that a large capture does not try
+ * every configured key on every packet.
+ */
+typedef struct {
+    uint8_t  key[MATTER_SESSION_KEY_LEN];
+    uint64_t node_id;      /* Source node ID for the nonce ... */
+    bool     has_node_id;  /* ... or false to use the one from the message header */
+} matter_session_key_t;
+
+/* Session ID -> matter_session_key_t*, reset for each capture file */
+static wmem_map_t *matter_session_key_cache;
+
+/*
  * Construct the Matter message nonce (13 bytes) per spec Section 4.7.2:
  *   Nonce = security_flags (1) || message_counter (4 LE) || source_node_id (8 LE)
  *
@@ -364,6 +379,17 @@ matter_decrypt_payload(tvbuff_t *tvb, packet_info *pinfo,
     tvbuff_t *decrypted_tvb = tvb_new_child_real_data(tvb, decrypted, payload_len, payload_len);
     add_new_data_source(pinfo, decrypted_tvb, "Decrypted Matter Payload");
     return decrypted_tvb;
+}
+
+static tvbuff_t *
+matter_try_session_key(tvbuff_t *tvb, packet_info *pinfo, uint32_t offset, uint32_t payload_length,
+                       uint8_t security_flags, uint32_t message_counter, uint64_t source_node_id,
+                       const matter_session_key_t *sk)
+{
+    uint8_t nonce[MATTER_NONCE_LEN];
+    matter_build_nonce(security_flags, message_counter,
+                       sk->has_node_id ? sk->node_id : source_node_id, nonce);
+    return matter_decrypt_payload(tvb, pinfo, offset, payload_length, sk->key, nonce);
 }
 
 // Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
@@ -1344,35 +1370,52 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
         tvb_ensure_bytes_exist(tvb, offset, MATTER_MIC_LEN);
         uint32_t payload_length = tvb_reported_length_remaining(tvb, offset) - MATTER_MIC_LEN;
 
-        /* Every UAT entry (I2R and R2I key) is tried against every
-         * encrypted packet; session IDs are not used for matching, only
-         * MIC verification determines the correct key.  For I2R keys the
-         * nonce uses the Initiator node ID, for R2I keys the Responder
-         * node ID, falling back to the source node ID from the message
-         * header when the UAT row does not provide one. */
+        /* The session ID in the header is the receiver's local session
+         * ID, so it identifies both the session and the direction. Try
+         * the key that last worked for it first; otherwise every UAT
+         * entry (I2R and R2I key) is tried, and only MIC verification
+         * determines the correct key.  For I2R keys the nonce uses the
+         * Initiator node ID, for R2I keys the Responder node ID, falling
+         * back to the source node ID from the message header when the
+         * UAT row does not provide one. */
         tvbuff_t *decrypted_tvb = NULL;
         unsigned num_keys = 0;
+        matter_session_key_t winner = { { 0 }, 0, false };
+        bool from_cache = false;
+
+        const matter_session_key_t *cached = wmem_map_lookup(matter_session_key_cache, GUINT_TO_POINTER(session_id));
+        if (cached) {
+            num_keys++;
+            decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                   security_flags, message_counter, source_node_id, cached);
+            from_cache = (decrypted_tvb != NULL);
+        }
 
         for (unsigned i = 0; i < num_matter_key_uat_records && !decrypted_tvb; i++) {
             const matter_key_uat_record_t *rec = &matter_key_uat_records[i];
-            uint8_t nonce[MATTER_NONCE_LEN];
 
             if (rec->has_i2r_key) {
                 num_keys++;
-                matter_build_nonce(security_flags, message_counter,
-                                   rec->has_initiator_node_id ? rec->initiator_node_id : source_node_id,
-                                   nonce);
-                decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset, payload_length,
-                                                       rec->i2r_key_bytes, nonce);
+                memcpy(winner.key, rec->i2r_key_bytes, MATTER_SESSION_KEY_LEN);
+                winner.node_id = rec->initiator_node_id;
+                winner.has_node_id = rec->has_initiator_node_id;
+                decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                       security_flags, message_counter, source_node_id, &winner);
             }
             if (rec->has_r2i_key && !decrypted_tvb) {
                 num_keys++;
-                matter_build_nonce(security_flags, message_counter,
-                                   rec->has_responder_node_id ? rec->responder_node_id : source_node_id,
-                                   nonce);
-                decrypted_tvb = matter_decrypt_payload(tvb, pinfo, offset, payload_length,
-                                                       rec->r2i_key_bytes, nonce);
+                memcpy(winner.key, rec->r2i_key_bytes, MATTER_SESSION_KEY_LEN);
+                winner.node_id = rec->responder_node_id;
+                winner.has_node_id = rec->has_responder_node_id;
+                decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                       security_flags, message_counter, source_node_id, &winner);
             }
+        }
+
+        if (decrypted_tvb && !from_cache) {
+            matter_session_key_t *entry = wmem_new(wmem_file_scope(), matter_session_key_t);
+            *entry = winner;
+            wmem_map_insert(matter_session_key_cache, GUINT_TO_POINTER(session_id), entry);
         }
 
         if (decrypted_tvb) {
@@ -2096,6 +2139,9 @@ proto_register_matter(void)
 
     expert_module_t *expert = expert_register_protocol(proto_matter);
     expert_register_field_array(expert, ei, array_length(ei));
+
+    matter_session_key_cache = wmem_map_new_autoreset(wmem_epan_scope(), wmem_file_scope(),
+                                                      g_direct_hash, g_direct_equal);
 
     module_t *matter_module = prefs_register_protocol(proto_matter, NULL);
     /* UAT for entering CASE session keys directly in preferences */
