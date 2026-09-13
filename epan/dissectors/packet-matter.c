@@ -29,7 +29,9 @@
 #include <epan/proto_data.h>
 #include <epan/uat.h>
 #include <wsutil/array.h>
+#include <wsutil/file_util.h>
 #include <wsutil/wsgcrypt.h>
+#include <wsutil/strtoi.h>
 #include "packet-matter-clusters.h"
 
 /* Prototypes */
@@ -670,6 +672,134 @@ matter_try_group_privacy(tvbuff_t *tvb, packet_info *pinfo, uint32_t privacy_off
         *out_source = source;
     }
     return dec;
+}
+
+/*
+ * Key log file support.
+ *
+ * A key log file lets a Matter controller export session keys so that a
+ * capture decrypts without hand-entering them. It is a line-based text file;
+ * blank lines and lines beginning with '#' are ignored. Two record types are
+ * understood:
+ *
+ *   CASE_KEY <session_id> <source_node_id> <key>
+ *   GROUP_EPOCH_KEY <compressed_fabric_id> <epoch_key>
+ *
+ * session_id and source_node_id are hex (0x-prefixed accepted); keys are 32 hex
+ * characters (16 bytes), the compressed fabric ID is 16 hex characters. The
+ * source node ID is the sender's node ID, used to build the decryption nonce
+ * (unicast headers usually omit it); a value of 0 falls back to the source node
+ * ID present in the message header. One session has two keys, one per
+ * direction, each logged with the node ID of the peer that sends with it.
+ */
+typedef struct {
+    uint32_t session_id;
+    uint8_t  key[MATTER_SESSION_KEY_LEN];
+    uint64_t node_id;
+    bool     has_node_id;
+} matter_keylog_case_t;
+
+typedef struct {
+    uint16_t group_session_id;
+    uint8_t  operational_key[MATTER_SESSION_KEY_LEN];
+    uint8_t  privacy_key[MATTER_SESSION_KEY_LEN];
+} matter_keylog_group_t;
+
+static const char *matter_keylog_filename;   /* managed by the preference */
+static GArray      *matter_keylog_case;       /* matter_keylog_case_t */
+static GArray      *matter_keylog_group;      /* matter_keylog_group_t */
+static int64_t      matter_keylog_mtime;
+static int64_t      matter_keylog_size;
+
+static bool
+matter_keylog_hex64(const char *tok, uint64_t *out)
+{
+    if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X'))
+        tok += 2;
+    return ws_hexstrtou64(tok, NULL, out);
+}
+
+static void
+matter_keylog_parse_line(char *line)
+{
+    /* Trim comments and whitespace. */
+    char *hash = strchr(line, '#');
+    if (hash)
+        *hash = '\0';
+    char *tok = strtok(line, " \t\r\n");
+    if (tok == NULL)
+        return;
+
+    if (g_strcmp0(tok, "CASE_KEY") == 0) {
+        char *sid = strtok(NULL, " \t\r\n");
+        char *src = strtok(NULL, " \t\r\n");
+        char *key = strtok(NULL, " \t\r\n");
+        if (!sid || !src || !key)
+            return;
+        matter_keylog_case_t rec = { 0, { 0 }, 0, false };
+        uint64_t sid64, src64;
+        if (!matter_keylog_hex64(sid, &sid64) || !matter_keylog_hex64(src, &src64))
+            return;
+        if (strlen(key) != 2 * MATTER_SESSION_KEY_LEN ||
+            !hex_to_bytes(key, rec.key, MATTER_SESSION_KEY_LEN))
+            return;
+        rec.session_id = (uint32_t)sid64;
+        rec.node_id = src64;
+        rec.has_node_id = (src64 != 0);
+        g_array_append_val(matter_keylog_case, rec);
+    } else if (g_strcmp0(tok, "GROUP_EPOCH_KEY") == 0) {
+        char *cfid = strtok(NULL, " \t\r\n");
+        char *epoch = strtok(NULL, " \t\r\n");
+        if (!cfid || !epoch)
+            return;
+        uint8_t cfid_bytes[MATTER_COMPRESSED_FABRIC_ID_LEN];
+        uint8_t epoch_bytes[MATTER_SESSION_KEY_LEN];
+        if (strlen(cfid) != 2 * MATTER_COMPRESSED_FABRIC_ID_LEN ||
+            !hex_to_bytes(cfid, cfid_bytes, MATTER_COMPRESSED_FABRIC_ID_LEN))
+            return;
+        if (strlen(epoch) != 2 * MATTER_SESSION_KEY_LEN ||
+            !hex_to_bytes(epoch, epoch_bytes, MATTER_SESSION_KEY_LEN))
+            return;
+        matter_keylog_group_t rec;
+        matter_derive_group_keys(epoch_bytes, cfid_bytes, rec.operational_key,
+                                 rec.privacy_key, &rec.group_session_id);
+        g_array_append_val(matter_keylog_group, rec);
+    }
+}
+
+/* (Re)load the key log file if it has been configured and has changed. */
+static void
+matter_keylog_reload(void)
+{
+    if (matter_keylog_case == NULL)
+        matter_keylog_case = g_array_new(false, false, sizeof(matter_keylog_case_t));
+    if (matter_keylog_group == NULL)
+        matter_keylog_group = g_array_new(false, false, sizeof(matter_keylog_group_t));
+
+    if (matter_keylog_filename == NULL || matter_keylog_filename[0] == '\0') {
+        g_array_set_size(matter_keylog_case, 0);
+        g_array_set_size(matter_keylog_group, 0);
+        matter_keylog_mtime = matter_keylog_size = 0;
+        return;
+    }
+
+    ws_statb64 st;
+    if (ws_stat64(matter_keylog_filename, &st) != 0)
+        return;
+    if (st.st_mtime == matter_keylog_mtime && st.st_size == matter_keylog_size)
+        return;   /* unchanged since last load */
+    matter_keylog_mtime = st.st_mtime;
+    matter_keylog_size = st.st_size;
+
+    FILE *fp = ws_fopen(matter_keylog_filename, "r");
+    if (fp == NULL)
+        return;
+    g_array_set_size(matter_keylog_case, 0);
+    g_array_set_size(matter_keylog_group, 0);
+    char buf[512];
+    while (fgets(buf, sizeof(buf), fp) != NULL)
+        matter_keylog_parse_line(buf);
+    fclose(fp);
 }
 
 // Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
@@ -1559,6 +1689,8 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "Matter");
 
+    matter_keylog_reload();
+
     /* create display subtree for the protocol */
     ti = proto_tree_add_item(tree, proto_matter, tvb, 0, -1, ENC_NA);
 
@@ -1664,6 +1796,16 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
                 dec = matter_try_group_privacy(tvb, pinfo, privacy_off, privacy_header_length,
                                                payload_off, payload_len, session_id, message_flags,
                                                harv->operational_key, harv->privacy_key,
+                                               deobf, &message_counter, &source_node_id);
+            }
+            for (unsigned i = 0; matter_keylog_group && i < matter_keylog_group->len && !dec; i++) {
+                const matter_keylog_group_t *kl = &g_array_index(matter_keylog_group, matter_keylog_group_t, i);
+                if (kl->group_session_id != session_id)
+                    continue;
+                privacy_num_keys++;
+                dec = matter_try_group_privacy(tvb, pinfo, privacy_off, privacy_header_length,
+                                               payload_off, payload_len, session_id, message_flags,
+                                               kl->operational_key, kl->privacy_key,
                                                deobf, &message_counter, &source_node_id);
             }
         }
@@ -1814,6 +1956,17 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
                 decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
                                                        security_flags, message_counter, source_node_id, &winner);
             }
+            for (unsigned i = 0; matter_keylog_group && i < matter_keylog_group->len && !decrypted_tvb; i++) {
+                const matter_keylog_group_t *kl = &g_array_index(matter_keylog_group, matter_keylog_group_t, i);
+                if (kl->group_session_id != session_id)
+                    continue;
+                num_keys++;
+                memcpy(winner.key, kl->operational_key, MATTER_SESSION_KEY_LEN);
+                winner.node_id = 0;
+                winner.has_node_id = false;
+                decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                       security_flags, message_counter, source_node_id, &winner);
+            }
         } else {
             for (unsigned i = 0; i < num_matter_key_uat_records && !decrypted_tvb; i++) {
                 const matter_key_uat_record_t *rec = &matter_key_uat_records[i];
@@ -1834,6 +1987,17 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
                     decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
                                                            security_flags, message_counter, source_node_id, &winner);
                 }
+            }
+            for (unsigned i = 0; matter_keylog_case && i < matter_keylog_case->len && !decrypted_tvb; i++) {
+                const matter_keylog_case_t *kl = &g_array_index(matter_keylog_case, matter_keylog_case_t, i);
+                if (kl->session_id != session_id)
+                    continue;
+                num_keys++;
+                memcpy(winner.key, kl->key, MATTER_SESSION_KEY_LEN);
+                winner.node_id = kl->node_id;
+                winner.has_node_id = kl->has_node_id;
+                decrypted_tvb = matter_try_session_key(tvb, pinfo, offset, payload_length,
+                                                       security_flags, message_counter, source_node_id, &winner);
             }
         }
 
@@ -2679,6 +2843,12 @@ proto_register_matter(void)
             NULL,
             NULL,
             matter_group_key_uat_fields);
+
+    prefs_register_filename_preference(matter_module, "keylog_file",
+            "Key log filename",
+            "A file of exported Matter session keys (CASE_KEY and "
+            "GROUP_EPOCH_KEY lines) used to decrypt captured traffic.",
+            &matter_keylog_filename, false);
 
     prefs_register_uat_preference(matter_module, "group_keys",
             "Group keys",

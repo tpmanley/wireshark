@@ -1162,7 +1162,7 @@ _ENC_SESSION_ID = 0x002A
 
 def _tshark_decrypt_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
                            packet_bytes, fields,
-                           uat_entries=None, group_entries=None, dst_port=5540):
+                           uat_entries=None, group_entries=None, keylog=None, dst_port=5540):
     """Write encrypted packet to pcap and extract fields via tshark with decryption.
 
     Decryption keys are provided via uat_entries: a list of UAT row dicts
@@ -1198,6 +1198,8 @@ def _tshark_decrypt_fields(cmd_tshark, cmd_text2pcap, test_env, result_file,
         for entry in group_entries:
             row = '"{}","{}"'.format(entry['epoch_key'], entry['compressed_fabric_id'])
             args.extend(['-o', f'uat:matter_group_keys:{row}'])
+    if keylog:
+        args.extend(['-o', f'matter.keylog_file:{keylog}'])
 
     result = subprocess.run(
         args, capture_output=True, check=True, encoding='utf-8', env=test_env,
@@ -1418,6 +1420,41 @@ class TestMatterGroupDecryption:
 
 class TestMatterDecryption:
     """Tests for CASE/PASE session decryption (MR4)."""
+
+    def _keylog(self, result_file, lines):
+        f = result_file('matter_keys.log')
+        with open(f, 'w') as fh:
+            fh.write("\n".join(lines) + "\n")
+        return f
+
+    def test_keylog_case(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A CASE_KEY line in a key log file decrypts a unicast session."""
+        kl = self._keylog(result_file,
+            ['# test', f'CASE_KEY 0x002A 0x0 {_ENC_KEY_HEX}'])
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['_ws.col.Info'], keylog=kl)
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_keylog_group_epoch(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A GROUP_EPOCH_KEY line decrypts a group session."""
+        kl = self._keylog(result_file,
+            [f'GROUP_EPOCH_KEY {_GROUP_CFID} {_GROUP_EPOCH_KEY}'])
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP, ['matter.tlv.value_uint', '_ws.col.Info'], keylog=kl)
+        assert result['matter.tlv.value_uint'] == '42'
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_keylog_group_privacy(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A GROUP_EPOCH_KEY line also decrypts a privacy-obfuscated group message."""
+        kl = self._keylog(result_file,
+            [f'GROUP_EPOCH_KEY {_GROUP_CFID} {_GROUP_EPOCH_KEY}'])
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_GROUP_PRIVACY, ['matter.message.counter', '_ws.col.Info'], keylog=kl)
+        assert result['matter.message.counter'] == '9'
+        assert '[Decrypted]' in result['_ws.col.Info']
 
     def test_decrypt_key_cached_per_session(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """Once a key has decrypted a session, later packets and other sessions still decrypt."""
