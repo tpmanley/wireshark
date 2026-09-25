@@ -1696,6 +1696,11 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
     matter_tree = proto_item_add_subtree(ti, ett_matter);
 
+    /* Stashed so that dissect_matter_payload() and the TLV walker, several
+     * calls removed from here, can append the same summary text onto the
+     * root item that they append to COL_INFO. */
+    p_add_proto_data(pinfo->pool, pinfo, proto_matter, 1, ti);
+
     static int* const message_flag_fields[] = {
         &hf_message_version,
         &hf_message_has_source,
@@ -1730,12 +1735,16 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
     // when both Session Type and Session ID are set to 0."
     is_unsecured_session = (message_session_type == SECURITY_FLAG_SESSION_TYPE_UNICAST && session_id == 0);
 
-    if (is_unsecured_session)
+    if (is_unsecured_session) {
         col_set_str(pinfo->cinfo, COL_INFO, "Unsecured Session");
-    else if (message_session_type == SECURITY_FLAG_SESSION_TYPE_UNICAST)
+        proto_item_append_text(ti, ", Unsecured Session");
+    } else if (message_session_type == SECURITY_FLAG_SESSION_TYPE_UNICAST) {
         col_add_fstr(pinfo->cinfo, COL_INFO, "Unicast Session [0x%04x]", session_id);
-    else if (message_session_type == SECURITY_FLAG_SESSION_TYPE_GROUP)
+        proto_item_append_text(ti, ", Unicast Session [0x%04x]", session_id);
+    } else if (message_session_type == SECURITY_FLAG_SESSION_TYPE_GROUP) {
         col_add_fstr(pinfo->cinfo, COL_INFO, "Group Session [0x%04x]", session_id);
+        proto_item_append_text(ti, ", Group Session [0x%04x]", session_id);
+    }
 
     /* Section 2.5.4.2: operational group multicast addresses have the form
      * FF35:0040:FD<fabric-id>:00<group-id>. When the message arrived on such
@@ -1894,6 +1903,7 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
             dissect_matter_payload(privacy_payload_tvb, pinfo, payload_tree);
             proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
             col_append_str(pinfo->cinfo, COL_INFO, " [Decrypted]");
+            proto_item_append_text(ti, " [Decrypted]");
         } else if (privacy_num_keys > 0) {
             proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [Decryption failed - %u key(s) tried]", payload_length, privacy_num_keys);
             expert_add_info_format(pinfo, payload_item, &ei_matter_decryption_failed,
@@ -2016,6 +2026,7 @@ dissect_matter(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _
 
             proto_tree_add_item(matter_tree, hf_payload_mic, tvb, offset + payload_length, MATTER_MIC_LEN, ENC_NA);
             col_append_str(pinfo->cinfo, COL_INFO, " [Decrypted]");
+            proto_item_append_text(ti, " [Decrypted]");
         } else if (num_keys > 0) {
             /* Keys were found but none worked */
             proto_item *payload_item = proto_tree_add_none_format(matter_tree, hf_payload, tvb, offset, payload_length, "Encrypted Payload (%u bytes) [Decryption failed - %u key(s) tried]", payload_length, num_keys);
@@ -2089,10 +2100,15 @@ dissect_matter_payload(tvbuff_t *tvb, packet_info *pinfo _U_, proto_tree *pl_tre
         opcode_name = try_val_to_str(protocol_opcode, opcode_vals_by_protocol[protocol_id]);
     }
     const char *protocol_name = val_to_str_const(protocol_id, protocol_id_vals, "Unknown");
+    proto_item *root_ti = (proto_item *)p_get_proto_data(pinfo->pool, pinfo, proto_matter, 1);
     if (opcode_name) {
         col_append_fstr(pinfo->cinfo, COL_INFO, " %s: %s", protocol_name, opcode_name);
+        if (root_ti)
+            proto_item_append_text(root_ti, ", %s: %s", protocol_name, opcode_name);
     } else {
         col_append_fstr(pinfo->cinfo, COL_INFO, " %s: Opcode=0x%02x", protocol_name, protocol_opcode);
+        if (root_ti)
+            proto_item_append_text(root_ti, ", %s: Opcode=0x%02x", protocol_name, protocol_opcode);
     }
 
     // Section 4.4.3.6
@@ -2337,10 +2353,18 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                 if (is_cluster_tag) {
                     current_cluster = val;
                     const char *cluster_name = try_val_to_str(val, matter_cluster_id_vals);
+                    /* A CommandPathIB's Cluster is always followed by its
+                     * Command, so defer the COL_INFO/root summary to the
+                     * combined "Cluster.Command" appended there instead. */
+                    bool is_command_path = (ctx == MATTER_TLV_CONTEXT_COMMAND_PATH ||
+                                             ctx == MATTER_TLV_CONTEXT_COMMAND_PATH_RESPONSE);
                     if (cluster_name) {
                         proto_item_append_text(ti_element, " (Cluster: %s)", cluster_name);
-                        if (!p_get_proto_data(pinfo->pool, pinfo, proto_matter, 0)) {
+                        if (!is_command_path && !p_get_proto_data(pinfo->pool, pinfo, proto_matter, 0)) {
+                            proto_item *root_ti = (proto_item *)p_get_proto_data(pinfo->pool, pinfo, proto_matter, 1);
                             col_append_fstr(pinfo->cinfo, COL_INFO, " (%s)", cluster_name);
+                            if (root_ti)
+                                proto_item_append_text(root_ti, ", %s", cluster_name);
                             p_add_proto_data(pinfo->pool, pinfo, proto_matter, 0, GUINT_TO_POINTER(1));
                         }
                     } else {
@@ -2364,6 +2388,25 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                         proto_item_append_text(ti_element, " (Command: %s)", cn);
                     else
                         proto_item_append_text(ti_element, " (Command: 0x%02X)", val);
+
+                    if (!p_get_proto_data(pinfo->pool, pinfo, proto_matter, 2)) {
+                        char cluster_buf[16], cmd_buf[16];
+                        const char *cluster_disp = try_val_to_str(current_cluster, matter_cluster_id_vals);
+                        if (!cluster_disp) {
+                            g_snprintf(cluster_buf, sizeof(cluster_buf), "0x%04X", current_cluster);
+                            cluster_disp = cluster_buf;
+                        }
+                        const char *cmd_disp = cn;
+                        if (!cmd_disp) {
+                            g_snprintf(cmd_buf, sizeof(cmd_buf), "0x%02X", val);
+                            cmd_disp = cmd_buf;
+                        }
+                        proto_item *root_ti = (proto_item *)p_get_proto_data(pinfo->pool, pinfo, proto_matter, 1);
+                        col_append_fstr(pinfo->cinfo, COL_INFO, " (%s.%s)", cluster_disp, cmd_disp);
+                        if (root_ti)
+                            proto_item_append_text(root_ti, ", %s.%s", cluster_disp, cmd_disp);
+                        p_add_proto_data(pinfo->pool, pinfo, proto_matter, 2, GUINT_TO_POINTER(1));
+                    }
                 }
             } else {
                 proto_tree_add_item(tree_element, hf, tvb, offset, size, ENC_LITTLE_ENDIAN);
