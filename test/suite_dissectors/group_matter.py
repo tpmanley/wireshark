@@ -1436,6 +1436,27 @@ class TestMatterDecryption:
             _ENC_PKT_BASIC, ['_ws.col.Info'], keylog=kl)
         assert '[Decrypted]' in result['_ws.col.Info']
 
+    def test_keylog_pase(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A PASE_KEY line decrypts a unicast session using source node ID 0 in the nonce."""
+        kl = self._keylog(result_file, [f'PASE_KEY 0x002A {_ENC_KEY_HEX}'])
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_BASIC, ['_ws.col.Info'], keylog=kl)
+        assert '[Decrypted]' in result['_ws.col.Info']
+
+    def test_keylog_pase_ignores_header_source(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
+        """A PASE_KEY always uses node ID 0, unlike a CASE_KEY with node 0x0.
+
+        _ENC_PKT_SRC_NODE was encrypted with the source node ID from its
+        header. A CASE_KEY with node 0x0 falls back to that header value; a
+        PASE_KEY must not, because PASE messages always use node ID 0.
+        """
+        kl = self._keylog(result_file, [f'PASE_KEY 0x002A {_ENC_KEY_HEX}'])
+        result = _tshark_decrypt_fields(
+            cmd_tshark, cmd_text2pcap, test_env, result_file,
+            _ENC_PKT_SRC_NODE, ['matter.decryption.failed'], keylog=kl)
+        assert result['matter.decryption.failed'] != ''
+
     def test_keylog_group_epoch(self, cmd_tshark, cmd_text2pcap, test_env, result_file):
         """A GROUP_EPOCH_KEY line decrypts a group session."""
         kl = self._keylog(result_file,

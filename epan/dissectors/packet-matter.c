@@ -679,9 +679,10 @@ matter_try_group_privacy(tvbuff_t *tvb, packet_info *pinfo, uint32_t privacy_off
  *
  * A key log file lets a Matter controller export session keys so that a
  * capture decrypts without hand-entering them. It is a line-based text file;
- * blank lines and lines beginning with '#' are ignored. Two record types are
+ * blank lines and lines beginning with '#' are ignored. Three record types are
  * understood:
  *
+ *   PASE_KEY <session_id> <key>
  *   CASE_KEY <session_id> <source_node_id> <key>
  *   GROUP_EPOCH_KEY <compressed_fabric_id> <epoch_key>
  *
@@ -691,6 +692,8 @@ matter_try_group_privacy(tvbuff_t *tvb, packet_info *pinfo, uint32_t privacy_off
  * (unicast headers usually omit it); a value of 0 falls back to the source node
  * ID present in the message header. One session has two keys, one per
  * direction, each logged with the node ID of the peer that sends with it.
+ * PASE_KEY records have no node ID: PASE messages always use node ID 0 in the
+ * nonce, so the header's source node ID is never used for them.
  */
 typedef struct {
     uint32_t session_id;
@@ -746,6 +749,22 @@ matter_keylog_parse_line(char *line)
         rec.session_id = (uint32_t)sid64;
         rec.node_id = src64;
         rec.has_node_id = (src64 != 0);
+        g_array_append_val(matter_keylog_case, rec);
+    } else if (g_strcmp0(tok, "PASE_KEY") == 0) {
+        /* PASE messages always use source node ID 0 in the nonce, so the
+         * record carries no node ID and never falls back to the header. */
+        char *sid = strtok(NULL, " \t\r\n");
+        char *key = strtok(NULL, " \t\r\n");
+        if (!sid || !key)
+            return;
+        matter_keylog_case_t rec = { 0, { 0 }, 0, true };
+        uint64_t sid64;
+        if (!matter_keylog_hex64(sid, &sid64))
+            return;
+        if (strlen(key) != 2 * MATTER_SESSION_KEY_LEN ||
+            !hex_to_bytes(key, rec.key, MATTER_SESSION_KEY_LEN))
+            return;
+        rec.session_id = (uint32_t)sid64;
         g_array_append_val(matter_keylog_case, rec);
     } else if (g_strcmp0(tok, "GROUP_EPOCH_KEY") == 0) {
         char *cfid = strtok(NULL, " \t\r\n");
@@ -2889,8 +2908,8 @@ proto_register_matter(void)
 
     prefs_register_filename_preference(matter_module, "keylog_file",
             "Key log filename",
-            "A file of exported Matter session keys (CASE_KEY and "
-            "GROUP_EPOCH_KEY lines) used to decrypt captured traffic.",
+            "A file of exported Matter session keys (PASE_KEY, CASE_KEY "
+            "and GROUP_EPOCH_KEY lines) used to decrypt captured traffic.",
             &matter_keylog_filename, false);
 
     prefs_register_uat_preference(matter_module, "group_keys",
