@@ -98,6 +98,7 @@
 #include <epan/to_str.h>
 #include <epan/show_exception.h>
 #include <epan/proto_data.h>
+#include <epan/secrets.h>
 #include <epan/etypes.h>
 #include <epan/oui.h>
 #include <epan/tap.h>
@@ -109,6 +110,8 @@
 #include <wsutil/wsgcrypt.h>
 
 #include <wsutil/ws_padding_to.h>
+
+#include <wiretap/secrets-types.h>
 
 #include "packet-ieee802154.h"
 #include "packet-sll.h"
@@ -376,6 +379,62 @@ static void ieee802154_key_free_cb(void*r) {
 UAT_CSTRING_CB_DEF(key_uat, pref_key, ieee802154_key_t)
 UAT_DEC_CB_DEF(key_uat, key_index, ieee802154_key_t)
 UAT_VS_DEF(key_uat, hash_type, ieee802154_key_t, ieee802154_key_hash, KEY_HASH_NONE, "No hash")
+
+/*
+ * Thread network keys from pcapng Decryption Secrets Blocks of type
+ * SECRETS_TYPE_THREAD_NWK_KEY: one hex network key per line, blank lines and
+ * lines beginning with '#' are ignored. They are tried after the Decryption
+ * Keys table as "Thread hash" keys, numbered after its entries, and dropped
+ * when the capture is closed; wiretap resupplies them after each redissection.
+ */
+static GArray *ieee802154_dsb_keys;   /* ieee802154_key_t */
+
+static void
+ieee802154_thread_secrets_block_callback(const void *secrets, unsigned size)
+{
+    if (ieee802154_dsb_keys == NULL)
+        ieee802154_dsb_keys = g_array_new(false, true, sizeof(ieee802154_key_t));
+
+    char *text = g_strndup((const char *)secrets, size);
+    char **lines = g_strsplit(text, "\n", -1);
+    for (char **line = lines; *line != NULL; line++) {
+        char *hash = strchr(*line, '#');
+        if (hash)
+            *hash = '\0';
+        g_strstrip(*line);
+        if (**line == '\0')
+            continue;
+
+        GByteArray *bytes = g_byte_array_new();
+        if (hex_str_to_bytes(*line, bytes, false) && bytes->len >= IEEE802154_CIPHER_SIZE) {
+            ieee802154_key_t key = { 0 };
+            key.pref_key = g_strdup(*line);
+            key.hash_type = KEY_HASH_THREAD;
+            g_array_append_val(ieee802154_dsb_keys, key);
+        }
+        g_byte_array_free(bytes, true);
+    }
+    g_strfreev(lines);
+    g_free(text);
+}
+
+static void
+ieee802154_dsb_keys_cleanup(void)
+{
+    for (unsigned i = 0; ieee802154_dsb_keys && i < ieee802154_dsb_keys->len; i++)
+        g_free(g_array_index(ieee802154_dsb_keys, ieee802154_key_t, i).pref_key);
+    if (ieee802154_dsb_keys)
+        g_array_set_size(ieee802154_dsb_keys, 0);
+}
+
+/* Return key number n: the Decryption Keys table entries, then the DSB keys. */
+static ieee802154_key_t *
+ieee802154_get_key(unsigned n)
+{
+    if (n < num_ieee802154_keys)
+        return &ieee802154_keys[n];
+    return &g_array_index(ieee802154_dsb_keys, ieee802154_key_t, n - num_ieee802154_keys);
+}
 
 
 /*-------------------------------------
@@ -1988,10 +2047,11 @@ tvbuff_t *decrypt_ieee802154_payload(tvbuff_t * tvb, unsigned offset, packet_inf
     unsigned char key[IEEE802154_CIPHER_SIZE];
     unsigned char alt_key[IEEE802154_CIPHER_SIZE];
     tvbuff_t * payload_tvb = NULL;
+    unsigned num_keys = num_ieee802154_keys + (ieee802154_dsb_keys ? ieee802154_dsb_keys->len : 0);
 
     /* Lookup the key. */
-    for (decrypt_info->key_number = 0; decrypt_info->key_number < num_ieee802154_keys; decrypt_info->key_number++) {
-        unsigned nkeys = set_key_func(packet, key, alt_key, &ieee802154_keys[decrypt_info->key_number]);
+    for (decrypt_info->key_number = 0; decrypt_info->key_number < num_keys; decrypt_info->key_number++) {
+        unsigned nkeys = set_key_func(packet, key, alt_key, ieee802154_get_key(decrypt_info->key_number));
         if (nkeys >= 1) {
             /* Try with the initial key */
             payload_tvb = decrypt_func(tvb, offset, pinfo, packet, decrypt_info, key);
@@ -2007,7 +2067,7 @@ tvbuff_t *decrypt_ieee802154_payload(tvbuff_t * tvb, unsigned offset, packet_inf
             }
         }
     }
-    if (decrypt_info->key_number == num_ieee802154_keys) {
+    if (decrypt_info->key_number == num_keys) {
         /* None of the stored keys seemed to work */
         *decrypt_info->status = DECRYPT_PACKET_NO_KEY;
     }
@@ -5992,6 +6052,7 @@ proto_cleanup_ieee802154(void)
 {
     g_hash_table_destroy(ieee802154_map.short_table);
     g_hash_table_destroy(ieee802154_map.long_table);
+    ieee802154_dsb_keys_cleanup();
 }
 
 /* Returns the prompt string for the Decode-As dialog. */
@@ -7442,6 +7503,8 @@ void proto_register_ieee802154(void)
     /* Register the init routine. */
     register_init_routine(proto_init_ieee802154);
     register_cleanup_routine(proto_cleanup_ieee802154);
+
+    secrets_register_type(SECRETS_TYPE_THREAD_NWK_KEY, ieee802154_thread_secrets_block_callback);
 
     /*  Register Protocol name and description. */
     proto_ieee802154 = proto_register_protocol("IEEE 802.15.4 Low-Rate Wireless PAN", "IEEE 802.15.4",

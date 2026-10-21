@@ -31,6 +31,7 @@ extern "C" {
 #define SECRETS_TYPE_OPCUA          0x55414b4c /* OPC UA Key Log */
 #define SECRETS_TYPE_ESP            0x45535053 /* ESP SA Key */
 #define SECRETS_TYPE_MATTER         0x4d544b4c /* Matter Key Log */
+#define SECRETS_TYPE_THREAD_NWK_KEY 0x54484e4b /* Thread Network Key */
 
 /**
  * @brief Returns a description for a given secrets type.

@@ -28,6 +28,7 @@ const char* secrets_type_description(uint32_t type)
         { SECRETS_TYPE_OPCUA,           "OPC UA Key Log" },
         { SECRETS_TYPE_ESP,             "ESP SA Key" },
         { SECRETS_TYPE_MATTER,          "Matter Key Log" },
+        { SECRETS_TYPE_THREAD_NWK_KEY,  "Thread Network Key" },
         { 0, NULL }
     };
     return val_to_str_const(type, secrets_types_vals, "Unknown");
@@ -49,6 +50,8 @@ const char* secrets_type_description(uint32_t type)
             return "ESP SA Key";
         case SECRETS_TYPE_MATTER:
             return "Matter Key Log";
+        case SECRETS_TYPE_THREAD_NWK_KEY:
+            return "Thread Network Key";
         default:
             return "Unknown";
     }

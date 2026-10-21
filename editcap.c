@@ -180,6 +180,7 @@ static const struct {
     { "opcua",  SECRETS_TYPE_OPCUA },
     { "esp",    SECRETS_TYPE_ESP },
     { "matter", SECRETS_TYPE_MATTER },
+    { "thread", SECRETS_TYPE_THREAD_NWK_KEY },
 };
 
 static unsigned find_dct2000_real_data(const uint8_t *buf);

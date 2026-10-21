@@ -587,6 +587,7 @@ static const value_string dsb_secrets_types_vals[] = {
     { SECRETS_TYPE_OPCUA,           "OPC UA Key Log" },
     { SECRETS_TYPE_ESP,             "ESP SA Key" },
     { SECRETS_TYPE_MATTER,          "Matter Key Log" },
+    { SECRETS_TYPE_THREAD_NWK_KEY,  "Thread Network Key" },
     { 0, NULL }
 };
 
