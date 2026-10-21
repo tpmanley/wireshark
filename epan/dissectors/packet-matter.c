@@ -27,7 +27,9 @@
 #include <epan/packet.h>
 #include <epan/prefs.h>
 #include <epan/proto_data.h>
+#include <epan/secrets.h>
 #include <epan/uat.h>
+#include <wiretap/secrets-types.h>
 #include <wsutil/array.h>
 #include <wsutil/file_util.h>
 #include <wsutil/wsgcrypt.h>
@@ -694,18 +696,25 @@ matter_try_group_privacy(tvbuff_t *tvb, packet_info *pinfo, uint32_t privacy_off
  * direction, each logged with the node ID of the peer that sends with it.
  * PASE_KEY records have no node ID: PASE messages always use node ID 0 in the
  * nonce, so the header's source node ID is never used for them.
+ *
+ * The same lines can be embedded in a pcapng Decryption Secrets Block of type
+ * SECRETS_TYPE_MATTER (e.g. "editcap --inject-secrets matter,<file>"). Those
+ * records are kept alongside the key log file's and dropped when the capture
+ * is closed; wiretap resupplies them after each redissection.
  */
 typedef struct {
     uint32_t session_id;
     uint8_t  key[MATTER_SESSION_KEY_LEN];
     uint64_t node_id;
     bool     has_node_id;
+    bool     from_dsb;
 } matter_keylog_case_t;
 
 typedef struct {
     uint16_t group_session_id;
     uint8_t  operational_key[MATTER_SESSION_KEY_LEN];
     uint8_t  privacy_key[MATTER_SESSION_KEY_LEN];
+    bool     from_dsb;
 } matter_keylog_group_t;
 
 static const char *matter_keylog_filename;   /* managed by the preference */
@@ -723,7 +732,7 @@ matter_keylog_hex64(const char *tok, uint64_t *out)
 }
 
 static void
-matter_keylog_parse_line(char *line)
+matter_keylog_parse_line(char *line, bool from_dsb)
 {
     /* Trim comments and whitespace. */
     char *hash = strchr(line, '#');
@@ -739,7 +748,7 @@ matter_keylog_parse_line(char *line)
         char *key = strtok(NULL, " \t\r\n");
         if (!sid || !src || !key)
             return;
-        matter_keylog_case_t rec = { 0, { 0 }, 0, false };
+        matter_keylog_case_t rec = { 0, { 0 }, 0, false, from_dsb };
         uint64_t sid64, src64;
         if (!matter_keylog_hex64(sid, &sid64) || !matter_keylog_hex64(src, &src64))
             return;
@@ -757,7 +766,7 @@ matter_keylog_parse_line(char *line)
         char *key = strtok(NULL, " \t\r\n");
         if (!sid || !key)
             return;
-        matter_keylog_case_t rec = { 0, { 0 }, 0, true };
+        matter_keylog_case_t rec = { 0, { 0 }, 0, true, from_dsb };
         uint64_t sid64;
         if (!matter_keylog_hex64(sid, &sid64))
             return;
@@ -782,7 +791,31 @@ matter_keylog_parse_line(char *line)
         matter_keylog_group_t rec;
         matter_derive_group_keys(epoch_bytes, cfid_bytes, rec.operational_key,
                                  rec.privacy_key, &rec.group_session_id);
+        rec.from_dsb = from_dsb;
         g_array_append_val(matter_keylog_group, rec);
+    }
+}
+
+static void
+matter_keylog_alloc(void)
+{
+    if (matter_keylog_case == NULL)
+        matter_keylog_case = g_array_new(false, false, sizeof(matter_keylog_case_t));
+    if (matter_keylog_group == NULL)
+        matter_keylog_group = g_array_new(false, false, sizeof(matter_keylog_group_t));
+}
+
+/* Drop the records that came from the key log file, or from DSBs. */
+static void
+matter_keylog_remove(bool from_dsb)
+{
+    for (unsigned i = matter_keylog_case ? matter_keylog_case->len : 0; i-- > 0; ) {
+        if (g_array_index(matter_keylog_case, matter_keylog_case_t, i).from_dsb == from_dsb)
+            g_array_remove_index(matter_keylog_case, i);
+    }
+    for (unsigned i = matter_keylog_group ? matter_keylog_group->len : 0; i-- > 0; ) {
+        if (g_array_index(matter_keylog_group, matter_keylog_group_t, i).from_dsb == from_dsb)
+            g_array_remove_index(matter_keylog_group, i);
     }
 }
 
@@ -790,14 +823,10 @@ matter_keylog_parse_line(char *line)
 static void
 matter_keylog_reload(void)
 {
-    if (matter_keylog_case == NULL)
-        matter_keylog_case = g_array_new(false, false, sizeof(matter_keylog_case_t));
-    if (matter_keylog_group == NULL)
-        matter_keylog_group = g_array_new(false, false, sizeof(matter_keylog_group_t));
+    matter_keylog_alloc();
 
     if (matter_keylog_filename == NULL || matter_keylog_filename[0] == '\0') {
-        g_array_set_size(matter_keylog_case, 0);
-        g_array_set_size(matter_keylog_group, 0);
+        matter_keylog_remove(false);
         matter_keylog_mtime = matter_keylog_size = 0;
         return;
     }
@@ -813,12 +842,31 @@ matter_keylog_reload(void)
     FILE *fp = ws_fopen(matter_keylog_filename, "r");
     if (fp == NULL)
         return;
-    g_array_set_size(matter_keylog_case, 0);
-    g_array_set_size(matter_keylog_group, 0);
+    matter_keylog_remove(false);
     char buf[512];
     while (fgets(buf, sizeof(buf), fp) != NULL)
-        matter_keylog_parse_line(buf);
+        matter_keylog_parse_line(buf, false);
     fclose(fp);
+}
+
+/* Called by wiretap with the contents of a SECRETS_TYPE_MATTER DSB. */
+static void
+matter_secrets_block_callback(const void *secrets, unsigned size)
+{
+    matter_keylog_alloc();
+
+    char *text = g_strndup((const char *)secrets, size);
+    char **lines = g_strsplit(text, "\n", -1);
+    for (char **line = lines; *line != NULL; line++)
+        matter_keylog_parse_line(*line, true);
+    g_strfreev(lines);
+    g_free(text);
+}
+
+static void
+matter_secrets_cleanup(void)
+{
+    matter_keylog_remove(true);
 }
 
 // Section 4.10.4: Matter operational discovery uses UDP port 5540 by default.
@@ -2919,6 +2967,9 @@ proto_register_matter(void)
             "the compressed fabric ID (16 hex characters). The operational\n"
             "key, group session ID and privacy key are derived from them.",
             matter_group_keys_uat);
+
+    secrets_register_type(SECRETS_TYPE_MATTER, matter_secrets_block_callback);
+    register_cleanup_routine(matter_secrets_cleanup);
 }
 
 void

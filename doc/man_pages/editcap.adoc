@@ -507,7 +507,8 @@ __opcua__  OPC UA Key Log, see https://ietf-opsawg-wg.github.io/draft-ietf-opsaw
 __ssh__  SSH Key Log, see {wireshark-wiki-url}SSH#key-log-format +
 __tls__  TLS Key Log, see https://tlswg.org/sslkeylogfile/draft-ietf-tls-keylogfile.html +
 __wg__   WireGuard Key Log, see {wireshark-wiki-url}WireGuard#key-log-format +
-__esp__  ESP SA Key, see esp_sa file in your profile folder and https://ietf-opsawg-wg.github.io/draft-ietf-opsawg-pcap/draft-ietf-opsawg-pcapng.html#name-decryption-secrets-block
+__esp__  ESP SA Key, see esp_sa file in your profile folder and https://ietf-opsawg-wg.github.io/draft-ietf-opsawg-pcap/draft-ietf-opsawg-pcapng.html#name-decryption-secrets-block +
+__matter__  Matter Key Log (PASE_KEY, CASE_KEY and GROUP_EPOCH_KEY lines), see the Matter protocol's "Key log filename" preference
 
 This option may be specified multiple times. The available options for
 <secrets type> can be listed with *--inject-secrets help*.
