@@ -2460,12 +2460,12 @@ dissect_matter_tlv_internal(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
                         char cluster_buf[16], cmd_buf[16];
                         const char *cluster_disp = try_val_to_str(current_cluster, matter_cluster_id_vals);
                         if (!cluster_disp) {
-                            g_snprintf(cluster_buf, sizeof(cluster_buf), "0x%04X", current_cluster);
+                            snprintf(cluster_buf, sizeof(cluster_buf), "0x%04X", current_cluster);
                             cluster_disp = cluster_buf;
                         }
                         const char *cmd_disp = cn;
                         if (!cmd_disp) {
-                            g_snprintf(cmd_buf, sizeof(cmd_buf), "0x%02X", val);
+                            snprintf(cmd_buf, sizeof(cmd_buf), "0x%02X", val);
                             cmd_disp = cmd_buf;
                         }
                         proto_item *root_ti = (proto_item *)p_get_proto_data(pinfo->pool, pinfo, proto_matter, 1);
